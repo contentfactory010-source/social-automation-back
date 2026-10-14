@@ -75,3 +75,51 @@ gcloud run deploy social-automation-api \
 Set all production environment variables in Cloud Run. Use HTTPS URLs and `COOKIE_SECURE=true`.
 
 The current SQLite database is local to the service filesystem. It is suitable for an initial deployment, but it is not durable across Cloud Run restarts or multiple instances. Move persistence to Firestore or Cloud SQL before relying on this in production.
+
+## Cloudflare Python Worker deployment
+
+The repository also contains a Cloudflare Worker entrypoint. It keeps the FastAPI routes but uses Cloudflare Fetch for Instagram requests and D1 for persistence.
+
+Requirements: Node.js, `uv`, and a Cloudflare account with Workers and D1 enabled.
+
+Create the production D1 database from this directory:
+
+```bash
+npx wrangler d1 create social-automation
+```
+
+Copy the returned `database_id` into `wrangler.jsonc`. Apply the schema locally while developing:
+
+```bash
+npx wrangler d1 migrations apply social-automation --local
+```
+
+Set non-secret values in `wrangler.jsonc`. Store credentials as Worker secrets:
+
+```bash
+uv run pywrangler secret put INSTAGRAM_APP_ID
+uv run pywrangler secret put INSTAGRAM_APP_SECRET
+uv run pywrangler secret put INSTAGRAM_WEBHOOK_VERIFY_TOKEN
+```
+
+Apply the production migration and deploy:
+
+```bash
+npx wrangler d1 migrations apply social-automation --remote
+uv run pywrangler deploy
+```
+
+Run the Worker locally with its local D1 database:
+
+```bash
+uv run pywrangler dev
+```
+
+For GitHub deployment, connect this repository in **Cloudflare Dashboard → Workers & Pages → your Worker → Settings → Builds**. Use the repository root as the build directory and:
+
+```text
+Build command: uv sync --dev
+Deploy command: uv run pywrangler deploy
+```
+
+Configure the same Worker secrets in the Cloudflare dashboard. Configure the Instagram OAuth callback and webhook URLs using the deployed Worker hostname. Python Workers require the `python_workers` compatibility flag and use the `pywrangler` tool for local development and deployment. D1 is exposed through a Worker binding named `DB`.[Cloudflare Python Workers](https://developers.cloudflare.com/workers/languages/python/), [D1 from Python Workers](https://developers.cloudflare.com/d1/examples/query-d1-from-python-workers/)

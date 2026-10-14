@@ -1,0 +1,24 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "social-automation-back",
+  "main": "cloudflare_entry.py",
+  "compatibility_date": "2026-10-14",
+  "compatibility_flags": ["python_workers"],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "social-automation",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vars": {
+    "FRONTEND_URL": "https://YOUR_FIREBASE_PROJECT.web.app",
+    "PUBLIC_BACKEND_URL": "https://YOUR_WORKER.workers.dev",
+    "INSTAGRAM_REDIRECT_URI": "https://YOUR_WORKER.workers.dev/api/auth/instagram/callback",
+    "INSTAGRAM_SCOPES": "instagram_business_basic,instagram_business_manage_comments,instagram_business_manage_messages",
+    "INSTAGRAM_WEBHOOK_FIELDS": "comments,messages",
+    "COOKIE_SECURE": "true",
+    "COOKIE_SAMESITE": "none"
+  }
+}

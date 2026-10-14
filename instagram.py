@@ -4,7 +4,10 @@ import os
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
-import httpx
+try:
+    import httpx
+except ImportError:  # Cloudflare uses the Worker Fetch API instead.
+    httpx = None
 
 
 AUTHORIZE_URL = "https://www.instagram.com/oauth/authorize"

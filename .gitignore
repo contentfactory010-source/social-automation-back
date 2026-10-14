@@ -46,6 +46,8 @@ Thumbs.db
 
 # Environment variables
 .env
+.dev.vars
+.wrangler/
 .env.local
 .env.*.local
 .env.bak*

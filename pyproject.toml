@@ -1,0 +1,14 @@
+[project]
+name = "social-automation-cloudflare"
+version = "0.1.0"
+description = "Social Automation API running as a Cloudflare Python Worker"
+requires-python = ">=3.13"
+dependencies = [
+  "fastapi>=0.115,<1",
+]
+
+[dependency-groups]
+dev = [
+  "workers-py",
+  "workers-runtime-sdk",
+]

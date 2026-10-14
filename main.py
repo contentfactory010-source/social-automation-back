@@ -8,13 +8,24 @@ import json
 import logging
 import os
 import secrets
-import sqlite3
+try:
+    import sqlite3
+except ImportError:  # Cloudflare Python Workers do not provide sqlite3.
+    class _SQLiteCompat:
+        Row = dict
+        IntegrityError = Exception
+
+    sqlite3 = _SQLiteCompat()
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 from urllib.parse import urlencode
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:  # Worker variables are provided by Cloudflare bindings.
+    def load_dotenv() -> None:
+        return None
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
