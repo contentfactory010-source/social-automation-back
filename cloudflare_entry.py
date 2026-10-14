@@ -1,6 +1,5 @@
 """Cloudflare Python Worker entrypoint for the existing FastAPI application."""
 
-from fastapi.middleware.cors import CORSMiddleware
 from workers import asgi
 
 import main as legacy
@@ -22,6 +21,15 @@ legacy.reply_to_comment = cloudflare_instagram.reply_to_comment
 legacy.send_direct_message = cloudflare_instagram.send_direct_message
 legacy.subscribe_to_webhooks = cloudflare_instagram.subscribe_to_webhooks
 
+# FastAPI builds CORSMiddleware before Worker bindings are available. Remove
+# that static middleware and apply the Worker origin at request time instead.
+legacy.app.user_middleware = [
+    middleware
+    for middleware in legacy.app.user_middleware
+    if middleware.cls.__name__ != "CORSMiddleware"
+]
+legacy.app.middleware_stack = None
+
 
 @legacy.app.middleware("http")
 async def worker_context(request, call_next):
@@ -30,13 +38,31 @@ async def worker_context(request, call_next):
     legacy.COOKIE_SECURE = value("COOKIE_SECURE", "true").lower() == "true"
     legacy.COOKIE_SAMESITE = value("COOKIE_SAMESITE", "none").lower()
 
-    # CORS is configured after Worker bindings become available.
-    for middleware in legacy.app.user_middleware:
-        if middleware.cls is CORSMiddleware:
-            middleware.kwargs["allow_origins"] = [legacy.FRONTEND_URL]
-            break
     try:
-        return await call_next(request)
+        origin = request.headers.get("origin")
+        cors_headers = {}
+        if origin and origin.rstrip("/") == legacy.FRONTEND_URL:
+            cors_headers = {
+                "Access-Control-Allow-Origin": legacy.FRONTEND_URL,
+                "Access-Control-Allow-Credentials": "true",
+                "Vary": "Origin",
+            }
+
+        if request.method == "OPTIONS":
+            from starlette.responses import Response
+
+            response = Response(status_code=204)
+        else:
+            response = await call_next(request)
+
+        for name, header_value in cors_headers.items():
+            response.headers[name] = header_value
+        if request.method == "OPTIONS" and cors_headers:
+            response.headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = request.headers.get(
+                "access-control-request-headers", "Content-Type"
+            )
+        return response
     finally:
         reset_env(token)
 
