@@ -485,6 +485,20 @@ async def check_subscription(user_id: str, token: str) -> bool:
         return False
 
 
+def draft_value(config: dict, snake_name: str, camel_name: str, default=None):
+    return config.get(snake_name, config.get(camel_name, default))
+
+
+def keyword_matches(comment_text: str, keywords: list[str], exact_match: bool) -> bool:
+    normalized_text = comment_text.strip().casefold()
+    return any(
+        normalized_text == keyword.casefold()
+        if exact_match
+        else keyword.casefold() in normalized_text
+        for keyword in keywords
+    )
+
+
 @app.post("/api/webhooks/instagram")
 async def instagram_webhook(request: Request) -> dict:
     payload = await request.body()
@@ -505,6 +519,12 @@ async def instagram_webhook(request: Request) -> dict:
 
     for entry in event.get("entry", []):
         ig_user_id = str(entry.get("id", ""))
+        with connection() as db:
+            canonical_session = db.execute(
+                "SELECT id FROM sessions WHERE ig_user_id = ? ORDER BY connected_at DESC LIMIT 1",
+                (ig_user_id,),
+            ).fetchone()
+        canonical_session_id = canonical_session["id"] if canonical_session else ""
         for change in entry.get("changes", []):
             if change.get("field") != "comments":
                 continue
@@ -527,9 +547,11 @@ async def instagram_webhook(request: Request) -> dict:
                 matches = db.execute(
                     """SELECT a.id, a.keyword, a.text, s.access_token FROM automations a
                        JOIN sessions s ON a.session_id = s.id
-                       WHERE s.ig_user_id = ? AND a.post_id = ? AND a.enabled = 1 AND s.access_token IS NOT NULL""",
-                    (ig_user_id, post_id),
+                       WHERE s.ig_user_id = ? AND s.id = ? AND a.post_id = ?
+                         AND a.enabled = 1 AND s.access_token IS NOT NULL""",
+                    (ig_user_id, canonical_session_id, post_id),
                 ).fetchall()
+            logger.info("Legacy comment automations matches: %d", len(matches))
             for match in matches:
                 if match["keyword"].casefold() not in comment_text.casefold():
                     continue
@@ -556,35 +578,37 @@ async def instagram_webhook(request: Request) -> dict:
                 draft_rows = db.execute(
                     """SELECT d.*, s.access_token FROM automation_drafts d
                        JOIN sessions s ON d.session_id = s.id
-                       WHERE s.ig_user_id = ? AND d.enabled = 1 AND s.access_token IS NOT NULL""",
-                    (ig_user_id,),
+                       WHERE s.ig_user_id = ? AND s.id = ? AND d.enabled = 1
+                         AND s.access_token IS NOT NULL""",
+                    (ig_user_id, canonical_session_id),
                 ).fetchall()
             for draft in draft_rows:
                 config = json.loads(draft["config_json"])
-                if "comment" not in config.get("triggers", []):
+                triggers = draft_value(config, "triggers", "triggers", [])
+                if "comment" not in triggers:
                     continue
-                if config.get("post_scope") == "selected" and post_id not in config.get("post_ids", []):
+                post_scope = draft_value(config, "post_scope", "postScope", "selected")
+                post_ids = draft_value(config, "post_ids", "postIds", [])
+                if post_scope == "selected" and post_id not in post_ids:
                     continue
-                keywords = [str(keyword).strip() for keyword in config.get("keywords", []) if str(keyword).strip()]
-                if config.get("comment_mode") == "keywords":
-                    if not any(
-                        comment_text.casefold() == keyword.casefold()
-                        if config.get("exact_match")
-                        else keyword.casefold() in comment_text.casefold()
-                        for keyword in keywords
-                    ):
+                keywords = [str(keyword).strip() for keyword in draft_value(config, "keywords", "keywords", []) if str(keyword).strip()]
+                comment_mode = draft_value(config, "comment_mode", "commentMode", "keywords")
+                exact_match = bool(draft_value(config, "exact_match", "exactMatch", False))
+                if comment_mode == "keywords" and not keyword_matches(comment_text, keywords, exact_match):
+                    continue
+                if comment_mode not in {"any", "keywords"}:
                         continue
                 if not commenter_id:
                     continue
-                if config.get("check_subscription"):
+                if draft_value(config, "check_subscription", "checkSubscription", False):
                     subscribed = await check_subscription(commenter_id, draft["access_token"])
                     reply_text = (
-                        config.get("after_subscription_message", "")
+                        draft_value(config, "after_subscription_message", "afterSubscriptionMessage", "")
                         if subscribed
-                        else config.get("no_subscription_message", "")
+                        else draft_value(config, "no_subscription_message", "noSubscriptionMessage", "")
                     ).strip()
                 else:
-                    reply_text = config.get("welcome_message", "").strip()
+                    reply_text = draft_value(config, "welcome_message", "welcomeMessage", "").strip()
                 if not reply_text:
                     continue
                 try:
@@ -633,8 +657,9 @@ async def instagram_webhook(request: Request) -> dict:
                 matches = db.execute(
                     """SELECT a.id, a.keyword, a.text, s.access_token FROM automations a
                        JOIN sessions s ON a.session_id = s.id
-                       WHERE s.ig_user_id = ? AND a.post_id = '__direct__' AND a.enabled = 1 AND s.access_token IS NOT NULL""",
-                    (ig_user_id,),
+                       WHERE s.ig_user_id = ? AND s.id = ? AND a.post_id = '__direct__'
+                         AND a.enabled = 1 AND s.access_token IS NOT NULL""",
+                    (ig_user_id, canonical_session_id),
                 ).fetchall()
             logger.info("Legacy DM automation matches: %d", len(matches))
             for match in matches:
@@ -661,23 +686,39 @@ async def instagram_webhook(request: Request) -> dict:
                 draft_rows = db.execute(
                     """SELECT d.*, s.access_token FROM automation_drafts d
                        JOIN sessions s ON d.session_id = s.id
-                       WHERE s.ig_user_id = ? AND d.enabled = 1 AND s.access_token IS NOT NULL""",
-                    (ig_user_id,),
+                       WHERE s.ig_user_id = ? AND s.id = ? AND d.enabled = 1
+                         AND s.access_token IS NOT NULL""",
+                    (ig_user_id, canonical_session_id),
                 ).fetchall()
             logger.info("Form DM automations available: %d", len(draft_rows))
             for draft in draft_rows:
                 config = json.loads(draft["config_json"])
-                if "direct" not in config.get("triggers", []):
+                if "direct" not in draft_value(config, "triggers", "triggers", []):
                     continue
-                if config.get("check_subscription"):
+                keywords = [
+                    str(keyword).strip()
+                    for keyword in draft_value(config, "keywords", "keywords", [])
+                    if str(keyword).strip()
+                ]
+                comment_mode = draft_value(config, "comment_mode", "commentMode", "any")
+                exact_match = bool(draft_value(config, "exact_match", "exactMatch", False))
+                if comment_mode == "keywords" and not keyword_matches(message_text, keywords, exact_match):
+                    logger.info(
+                        "Skipping DM automation: draft=%s mode=keywords exact=%s keywords=%s",
+                        draft["id"],
+                        exact_match,
+                        keywords,
+                    )
+                    continue
+                if draft_value(config, "check_subscription", "checkSubscription", False):
                     subscribed = await check_subscription(sender_id, draft["access_token"])
                     reply_text = (
-                        config.get("after_subscription_message", "")
+                        draft_value(config, "after_subscription_message", "afterSubscriptionMessage", "")
                         if subscribed
-                        else config.get("no_subscription_message", "")
+                        else draft_value(config, "no_subscription_message", "noSubscriptionMessage", "")
                     ).strip()
                 else:
-                    reply_text = config.get("welcome_message", "").strip()
+                    reply_text = draft_value(config, "welcome_message", "welcomeMessage", "").strip()
                 if not reply_text:
                     continue
                 try:
