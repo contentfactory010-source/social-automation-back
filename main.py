@@ -131,6 +131,12 @@ class AutomationDraftInput(BaseModel):
     no_subscription_message: str = Field(max_length=500)
     no_subscription_button: str = Field(max_length=50)
     after_subscription_message: str = Field(max_length=500)
+    comment_replies_enabled: bool = False
+    comment_replies: list[str] = Field(default_factory=list, max_length=30)
+    link_reminder_enabled: bool = False
+    link_reminder_delay: int = Field(default=10, ge=1, le=1440)
+    additional_message_enabled: bool = False
+    additional_message_delay: int = Field(default=10, ge=1, le=1440)
 
 
 def draft_row(row: sqlite3.Row) -> dict:
@@ -168,6 +174,8 @@ def validate_draft(data: AutomationDraftInput) -> None:
                 raise ValueError("Image exceeds 1 MB")
         except (ValueError, binascii.Error) as exc:
             raise HTTPException(422, "Choose a PNG, JPEG, or WebP image under 1 MB") from exc
+    if any(not message.strip() or len(message) > 500 for message in data.comment_replies):
+        raise HTTPException(422, "Comment replies must contain text up to 500 characters")
 
 
 @app.get("/api/health")
@@ -597,7 +605,7 @@ async def instagram_webhook(request: Request) -> dict:
                 if comment_mode == "keywords" and not keyword_matches(comment_text, keywords, exact_match):
                     continue
                 if comment_mode not in {"any", "keywords"}:
-                        continue
+                    continue
                 if not commenter_id:
                     continue
                 if draft_value(config, "check_subscription", "checkSubscription", False):
@@ -611,6 +619,21 @@ async def instagram_webhook(request: Request) -> dict:
                     reply_text = draft_value(config, "welcome_message", "welcomeMessage", "").strip()
                 if not reply_text:
                     continue
+                comment_replies = [
+                    str(message).strip()
+                    for message in draft_value(config, "comment_replies", "commentReplies", [])
+                    if str(message).strip()
+                ]
+                if draft_value(config, "comment_replies_enabled", "commentRepliesEnabled", False) and comment_replies:
+                    try:
+                        await reply_to_comment(
+                            comment_id,
+                            secrets.choice(comment_replies),
+                            draft["access_token"],
+                        )
+                        logger.info("Instagram automatic comment reply sent: comment_id=%s draft=%s", comment_id, draft["id"])
+                    except InstagramError:
+                        logger.exception("Could not send automatic comment reply %s", comment_id)
                 try:
                     with connection() as db:
                         db.execute(
