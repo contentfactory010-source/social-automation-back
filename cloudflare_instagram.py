@@ -71,6 +71,14 @@ async def get_profile(token: str) -> dict:
     return await response.json()
 
 
+async def get_user_profile(user_id: str, token: str) -> dict:
+    response = await request(f"{GRAPH_URL}/{user_id}", params={
+        "fields": "is_user_follow_business",
+        "access_token": token,
+    })
+    return await response.json()
+
+
 async def get_posts(token: str) -> list[dict]:
     posts = []
     url = f"{GRAPH_URL}/me/media"

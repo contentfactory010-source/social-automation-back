@@ -38,6 +38,7 @@ from instagram import (
     exchange_code,
     get_posts,
     get_profile,
+    get_user_profile,
     reply_to_comment,
     send_direct_message,
     setting,
@@ -232,6 +233,31 @@ async def instagram_callback(request: Request, code: str = "", state: str = "", 
         ):
             db.execute("DELETE FROM automations WHERE session_id = ?", (session_id,))
             db.execute("DELETE FROM automation_drafts WHERE session_id = ?", (session_id,))
+        # A reconnect can create a new browser session. Remove stale data for
+        # the same Instagram account so webhooks cannot trigger hidden rules
+        # from an older session in addition to the current rules.
+        stale_sessions = db.execute(
+            "SELECT id FROM sessions WHERE ig_user_id = ? AND id != ?",
+            (instagram_user_id, session_id),
+        ).fetchall()
+        for stale in stale_sessions:
+            stale_id = stale["id"]
+            db.execute(
+                "DELETE FROM processed_comments WHERE automation_id IN (SELECT id FROM automations WHERE session_id = ?)",
+                (stale_id,),
+            )
+            db.execute(
+                "DELETE FROM processed_messages WHERE automation_id IN (SELECT id FROM automations WHERE session_id = ?)",
+                (stale_id,),
+            )
+            db.execute(
+                "DELETE FROM processed_draft_events WHERE draft_id IN (SELECT id FROM automation_drafts WHERE session_id = ?)",
+                (stale_id,),
+            )
+            db.execute("DELETE FROM automations WHERE session_id = ?", (stale_id,))
+            db.execute("DELETE FROM automation_drafts WHERE session_id = ?", (stale_id,))
+            db.execute("DELETE FROM oauth_states WHERE session_id = ?", (stale_id,))
+            db.execute("DELETE FROM sessions WHERE id = ?", (stale_id,))
         db.execute(
             """UPDATE sessions SET ig_user_id = ?, username = ?, access_token = ?,
                token_expires_at = ?, connected_at = ? WHERE id = ?""",
@@ -450,6 +476,15 @@ def verify_webhook(request: Request):
     return PlainTextResponse(challenge)
 
 
+async def check_subscription(user_id: str, token: str) -> bool:
+    try:
+        profile = await get_user_profile(user_id, token)
+        return bool(profile.get("is_user_follow_business", False))
+    except InstagramError:
+        logger.exception("Could not check Instagram subscription for user %s", user_id)
+        return False
+
+
 @app.post("/api/webhooks/instagram")
 async def instagram_webhook(request: Request) -> dict:
     payload = await request.body()
@@ -541,6 +576,17 @@ async def instagram_webhook(request: Request) -> dict:
                         continue
                 if not commenter_id:
                     continue
+                if config.get("check_subscription"):
+                    subscribed = await check_subscription(commenter_id, draft["access_token"])
+                    reply_text = (
+                        config.get("after_subscription_message", "")
+                        if subscribed
+                        else config.get("no_subscription_message", "")
+                    ).strip()
+                else:
+                    reply_text = config.get("welcome_message", "").strip()
+                if not reply_text:
+                    continue
                 try:
                     with connection() as db:
                         db.execute(
@@ -553,7 +599,7 @@ async def instagram_webhook(request: Request) -> dict:
                     await send_direct_message(
                         ig_user_id,
                         commenter_id,
-                        config["welcome_message"],
+                        reply_text,
                         draft["access_token"],
                     )
                 except InstagramError:
@@ -623,6 +669,17 @@ async def instagram_webhook(request: Request) -> dict:
                 config = json.loads(draft["config_json"])
                 if "direct" not in config.get("triggers", []):
                     continue
+                if config.get("check_subscription"):
+                    subscribed = await check_subscription(sender_id, draft["access_token"])
+                    reply_text = (
+                        config.get("after_subscription_message", "")
+                        if subscribed
+                        else config.get("no_subscription_message", "")
+                    ).strip()
+                else:
+                    reply_text = config.get("welcome_message", "").strip()
+                if not reply_text:
+                    continue
                 try:
                     with connection() as db:
                         db.execute(
@@ -635,7 +692,7 @@ async def instagram_webhook(request: Request) -> dict:
                     await send_direct_message(
                         ig_user_id,
                         sender_id,
-                        config["welcome_message"],
+                        reply_text,
                         draft["access_token"],
                     )
                     logger.info("Form Instagram DM reply sent: sender=%s message_id=%s", sender_id, message_id)

@@ -85,6 +85,19 @@ async def get_profile(token: str) -> dict:
             raise InstagramError("Could not load Instagram profile") from exc
 
 
+async def get_user_profile(user_id: str, token: str) -> dict:
+    async with httpx.AsyncClient(timeout=20) as client:
+        try:
+            response = await client.get(f"{GRAPH_URL}/{user_id}", params={
+                "fields": "is_user_follow_business",
+                "access_token": token,
+            })
+            response.raise_for_status()
+            return response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise InstagramError("Could not check Instagram subscription status") from exc
+
+
 async def get_posts(token: str) -> list[dict]:
     posts = []
     url = f"{GRAPH_URL}/me/media"

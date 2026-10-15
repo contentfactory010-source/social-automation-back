@@ -17,6 +17,7 @@ legacy.authorization_url = cloudflare_instagram.authorization_url
 legacy.exchange_code = cloudflare_instagram.exchange_code
 legacy.get_posts = cloudflare_instagram.get_posts
 legacy.get_profile = cloudflare_instagram.get_profile
+legacy.get_user_profile = cloudflare_instagram.get_user_profile
 legacy.reply_to_comment = cloudflare_instagram.reply_to_comment
 legacy.send_direct_message = cloudflare_instagram.send_direct_message
 legacy.subscribe_to_webhooks = cloudflare_instagram.subscribe_to_webhooks
