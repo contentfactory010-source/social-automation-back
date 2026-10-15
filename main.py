@@ -327,6 +327,37 @@ async def create_automation_draft(data: AutomationDraftInput, session: sqlite3.R
     return draft_row(row)
 
 
+@app.put("/api/automation-drafts/{draft_id}", dependencies=[Depends(require_browser_request)])
+async def update_automation_draft(
+    draft_id: str,
+    data: AutomationDraftInput,
+    session: sqlite3.Row = Depends(get_session),
+) -> dict:
+    validate_draft(data)
+    if data.post_ids:
+        try:
+            owned_posts = await get_posts(session["access_token"])
+        except InstagramError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        if not set(data.post_ids).issubset({post["id"] for post in owned_posts}):
+            raise HTTPException(404, "Instagram post not found")
+
+    timestamp = now()
+    with connection() as db:
+        existing = db.execute(
+            "SELECT id FROM automation_drafts WHERE id = ? AND session_id = ?",
+            (draft_id, session["id"]),
+        ).fetchone()
+        if not existing:
+            raise HTTPException(404, "Automation not found")
+        db.execute(
+            "UPDATE automation_drafts SET config_json = ?, updated_at = ? WHERE id = ? AND session_id = ?",
+            (data.model_dump_json(), timestamp, draft_id, session["id"]),
+        )
+        row = db.execute("SELECT * FROM automation_drafts WHERE id = ?", (draft_id,)).fetchone()
+    return draft_row(row)
+
+
 @app.put("/api/automations/{post_id}", dependencies=[Depends(require_browser_request)])
 async def save_automation(post_id: str, data: AutomationInput, session: sqlite3.Row = Depends(get_session)) -> dict:
     keyword, text = data.keyword.strip(), data.text.strip()
