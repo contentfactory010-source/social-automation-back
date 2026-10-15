@@ -107,12 +107,28 @@ async def reply_to_comment(comment_id: str, message: str, token: str) -> None:
     )
 
 
-async def send_direct_message(ig_user_id: str, recipient_id: str, message: str, token: str) -> None:
+async def send_direct_message(
+    ig_user_id: str,
+    recipient_id: str,
+    message: str,
+    token: str,
+    button_text: str = "",
+) -> None:
+    payload = {
+        "recipient": {"id": recipient_id},
+        "message": {"text": message},
+    }
+    if button_text.strip():
+        payload["message"]["quick_replies"] = [{
+            "content_type": "text",
+            "title": button_text.strip()[:20],
+            "payload": "SOCIAL_AUTOMATION_REPLY",
+        }]
     await request(
         f"{GRAPH_URL}/me/messages",
         "POST",
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
-        body=json.dumps({"recipient": {"id": recipient_id}, "message": {"text": message}}),
+        body=json.dumps(payload),
     )
 
 

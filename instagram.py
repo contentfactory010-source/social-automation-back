@@ -138,7 +138,13 @@ async def reply_to_comment(comment_id: str, message: str, token: str) -> None:
             raise InstagramError("Could not reply to Instagram comment") from exc
 
 
-async def send_direct_message(ig_user_id: str, recipient_id: str, message: str, token: str) -> None:
+async def send_direct_message(
+    ig_user_id: str,
+    recipient_id: str,
+    message: str,
+    token: str,
+    button_text: str = "",
+) -> None:
     """Send a DM through Instagram's Send API.
 
     Instagram only allows this for a recipient who has already initiated the
@@ -146,9 +152,19 @@ async def send_direct_message(ig_user_id: str, recipient_id: str, message: str, 
     """
     async with httpx.AsyncClient(timeout=20) as client:
         try:
+            payload = {
+                "recipient": {"id": recipient_id},
+                "message": {"text": message},
+            }
+            if button_text.strip():
+                payload["message"]["quick_replies"] = [{
+                    "content_type": "text",
+                    "title": button_text.strip()[:20],
+                    "payload": "SOCIAL_AUTOMATION_REPLY",
+                }]
             response = await client.post(
                 f"{GRAPH_URL}/me/messages",
-                json={"recipient": {"id": recipient_id}, "message": {"text": message}},
+                json=payload,
                 headers={"Authorization": f"Bearer {token}"},
             )
             response.raise_for_status()

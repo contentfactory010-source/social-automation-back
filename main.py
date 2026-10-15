@@ -615,8 +615,14 @@ async def instagram_webhook(request: Request) -> dict:
                         if subscribed
                         else draft_value(config, "no_subscription_message", "noSubscriptionMessage", "")
                     ).strip()
+                    reply_button = (
+                        ""
+                        if subscribed
+                        else draft_value(config, "no_subscription_button", "noSubscriptionButton", "")
+                    ).strip()
                 else:
                     reply_text = draft_value(config, "welcome_message", "welcomeMessage", "").strip()
+                    reply_button = draft_value(config, "welcome_button", "welcomeButton", "").strip()
                 if not reply_text:
                     continue
                 comment_replies = [
@@ -648,6 +654,7 @@ async def instagram_webhook(request: Request) -> dict:
                         commenter_id,
                         reply_text,
                         draft["access_token"],
+                        reply_button,
                     )
                 except InstagramError:
                     logger.exception("Could not send automation message for comment %s", comment_id)
@@ -740,8 +747,14 @@ async def instagram_webhook(request: Request) -> dict:
                         if subscribed
                         else draft_value(config, "no_subscription_message", "noSubscriptionMessage", "")
                     ).strip()
+                    reply_button = (
+                        ""
+                        if subscribed
+                        else draft_value(config, "no_subscription_button", "noSubscriptionButton", "")
+                    ).strip()
                 else:
                     reply_text = draft_value(config, "welcome_message", "welcomeMessage", "").strip()
+                    reply_button = draft_value(config, "welcome_button", "welcomeButton", "").strip()
                 if not reply_text:
                     continue
                 try:
@@ -758,6 +771,7 @@ async def instagram_webhook(request: Request) -> dict:
                         sender_id,
                         reply_text,
                         draft["access_token"],
+                        reply_button,
                     )
                     logger.info("Form Instagram DM reply sent: sender=%s message_id=%s", sender_id, message_id)
                 except InstagramError:
