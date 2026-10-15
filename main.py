@@ -50,6 +50,7 @@ logger = logging.getLogger("uvicorn.error")
 SESSION_COOKIE = "sa_session"
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
+COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "lax").lower()
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -82,7 +83,7 @@ def set_session_cookie(response: RedirectResponse, session_id: str) -> None:
         session_id,
         httponly=True,
         secure=COOKIE_SECURE,
-        samesite="lax",
+        samesite=COOKIE_SAMESITE,
         max_age=60 * 60 * 24 * 60,
     )
 
