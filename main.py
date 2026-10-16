@@ -131,6 +131,8 @@ class AutomationDraftInput(BaseModel):
     no_subscription_message: str = Field(max_length=500)
     no_subscription_button: str = Field(max_length=50)
     after_subscription_message: str = Field(max_length=500)
+    after_subscription_button: str = Field(max_length=50)
+    after_subscription_url: str = Field(max_length=2000)
     comment_replies_enabled: bool = False
     comment_replies: list[str] = Field(default_factory=list, max_length=30)
     link_reminder_enabled: bool = False
@@ -163,6 +165,8 @@ def validate_draft(data: AutomationDraftInput) -> None:
         raise HTTPException(422, "Complete subscription messages")
     if not data.welcome_message.strip():
         raise HTTPException(422, "Complete the welcome message")
+    if data.after_subscription_url.strip() and not data.after_subscription_url.strip().startswith(("http://", "https://")):
+        raise HTTPException(422, "The subscription link must start with http:// or https://")
     if data.welcome_image:
         try:
             header, encoded = data.welcome_image.split(",", 1)
@@ -616,13 +620,19 @@ async def instagram_webhook(request: Request) -> dict:
                         else draft_value(config, "no_subscription_message", "noSubscriptionMessage", "")
                     ).strip()
                     reply_button = (
-                        ""
+                        draft_value(config, "after_subscription_button", "afterSubscriptionButton", "")
                         if subscribed
                         else draft_value(config, "no_subscription_button", "noSubscriptionButton", "")
+                    ).strip()
+                    reply_url = (
+                        draft_value(config, "after_subscription_url", "afterSubscriptionUrl", "")
+                        if subscribed
+                        else ""
                     ).strip()
                 else:
                     reply_text = draft_value(config, "welcome_message", "welcomeMessage", "").strip()
                     reply_button = draft_value(config, "welcome_button", "welcomeButton", "").strip()
+                    reply_url = ""
                 if not reply_text:
                     continue
                 comment_replies = [
@@ -655,6 +665,7 @@ async def instagram_webhook(request: Request) -> dict:
                         reply_text,
                         draft["access_token"],
                         reply_button,
+                        reply_url,
                     )
                 except InstagramError:
                     logger.exception("Could not send automation message for comment %s", comment_id)
@@ -748,13 +759,19 @@ async def instagram_webhook(request: Request) -> dict:
                         else draft_value(config, "no_subscription_message", "noSubscriptionMessage", "")
                     ).strip()
                     reply_button = (
-                        ""
+                        draft_value(config, "after_subscription_button", "afterSubscriptionButton", "")
                         if subscribed
                         else draft_value(config, "no_subscription_button", "noSubscriptionButton", "")
+                    ).strip()
+                    reply_url = (
+                        draft_value(config, "after_subscription_url", "afterSubscriptionUrl", "")
+                        if subscribed
+                        else ""
                     ).strip()
                 else:
                     reply_text = draft_value(config, "welcome_message", "welcomeMessage", "").strip()
                     reply_button = draft_value(config, "welcome_button", "welcomeButton", "").strip()
+                    reply_url = ""
                 if not reply_text:
                     continue
                 try:
@@ -772,6 +789,7 @@ async def instagram_webhook(request: Request) -> dict:
                         reply_text,
                         draft["access_token"],
                         reply_button,
+                        reply_url,
                     )
                     logger.info("Form Instagram DM reply sent: sender=%s message_id=%s", sender_id, message_id)
                 except InstagramError:

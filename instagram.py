@@ -144,6 +144,7 @@ async def send_direct_message(
     message: str,
     token: str,
     button_text: str = "",
+    button_url: str = "",
 ) -> None:
     """Send a DM through Instagram's Send API.
 
@@ -152,11 +153,30 @@ async def send_direct_message(
     """
     async with httpx.AsyncClient(timeout=20) as client:
         try:
-            payload = {
-                "recipient": {"id": recipient_id},
-                "message": {"text": message},
-            }
-            if button_text.strip():
+            if button_url.strip():
+                payload = {
+                    "recipient": {"id": recipient_id},
+                    "message": {
+                        "attachment": {
+                            "type": "template",
+                            "payload": {
+                                "template_type": "button",
+                                "text": message,
+                                "buttons": [{
+                                    "type": "web_url",
+                                    "url": button_url.strip(),
+                                    "title": (button_text.strip() or "Open link")[:20],
+                                }],
+                            },
+                        },
+                    },
+                }
+            else:
+                payload = {
+                    "recipient": {"id": recipient_id},
+                    "message": {"text": message},
+                }
+            if button_text.strip() and not button_url.strip():
                 payload["message"]["quick_replies"] = [{
                     "content_type": "text",
                     "title": button_text.strip()[:20],
