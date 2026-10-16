@@ -131,8 +131,8 @@ class AutomationDraftInput(BaseModel):
     no_subscription_message: str = Field(max_length=500)
     no_subscription_button: str = Field(max_length=50)
     after_subscription_message: str = Field(max_length=500)
-    after_subscription_button: str = Field(max_length=50)
-    after_subscription_url: str = Field(max_length=2000)
+    after_subscription_button: str = Field(default="", max_length=50)
+    after_subscription_url: str = Field(default="", max_length=2000)
     comment_replies_enabled: bool = False
     comment_replies: list[str] = Field(default_factory=list, max_length=30)
     link_reminder_enabled: bool = False
@@ -629,10 +629,28 @@ async def instagram_webhook(request: Request) -> dict:
                         if subscribed
                         else ""
                     ).strip()
+                    reply_payload = ""
+                    if subscribed:
+                        with connection() as db:
+                            db.execute(
+                                "DELETE FROM pending_subscription_checks WHERE ig_user_id = ? AND sender_id = ? AND draft_id = ?",
+                                (ig_user_id, commenter_id, draft["id"]),
+                            )
+                    else:
+                        reply_button = reply_button or draft_value(
+                            config, "no_subscription_button", "noSubscriptionButton", "Check follow"
+                        ).strip() or "Check follow"
+                        reply_payload = f"SA_CHECK_SUBSCRIPTION:{draft['id']}"
+                        with connection() as db:
+                            db.execute(
+                                "INSERT OR REPLACE INTO pending_subscription_checks (ig_user_id, sender_id, draft_id, session_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                                (ig_user_id, commenter_id, draft["id"], canonical_session_id, now()),
+                            )
                 else:
                     reply_text = draft_value(config, "welcome_message", "welcomeMessage", "").strip()
                     reply_button = draft_value(config, "welcome_button", "welcomeButton", "").strip()
                     reply_url = ""
+                    reply_payload = ""
                 if not reply_text:
                     continue
                 comment_replies = [
@@ -666,6 +684,7 @@ async def instagram_webhook(request: Request) -> dict:
                         draft["access_token"],
                         reply_button,
                         reply_url,
+                        reply_payload,
                     )
                 except InstagramError:
                     logger.exception("Could not send automation message for comment %s", comment_id)
@@ -679,6 +698,7 @@ async def instagram_webhook(request: Request) -> dict:
             message = messaging.get("message", {})
             message_id = str(message.get("mid", ""))
             message_text = str(message.get("text", "")).strip()
+            quick_reply_payload = str((message.get("quick_reply") or {}).get("payload", ""))
             sender_id = str(messaging.get("sender", {}).get("id", ""))
             logger.info(
                 "Instagram message event: account=%s sender=%s message_id=%s has_text=%s echo=%s",
@@ -688,7 +708,80 @@ async def instagram_webhook(request: Request) -> dict:
                 bool(message_text),
                 bool(message.get("is_echo")),
             )
-            if not message_id or not message_text or not sender_id or sender_id == ig_user_id:
+            if not message_id or not sender_id or sender_id == ig_user_id:
+                continue
+
+            if quick_reply_payload.startswith("SA_CHECK_SUBSCRIPTION:"):
+                draft_id = quick_reply_payload.partition(":")[2]
+                with connection() as db:
+                    pending = db.execute(
+                        """SELECT p.draft_id, p.session_id, d.config_json, s.access_token
+                           FROM pending_subscription_checks p
+                           JOIN automation_drafts d ON d.id = p.draft_id AND d.enabled = 1
+                           JOIN sessions s ON s.id = p.session_id AND s.access_token IS NOT NULL
+                           WHERE p.ig_user_id = ? AND p.sender_id = ? AND p.draft_id = ? AND p.session_id = ?""",
+                        (ig_user_id, sender_id, draft_id, canonical_session_id),
+                    ).fetchone()
+                if not pending:
+                    logger.info("Ignoring subscription confirmation without pending check: draft=%s sender=%s", draft_id, sender_id)
+                    continue
+                try:
+                    with connection() as db:
+                        db.execute(
+                            "INSERT INTO processed_draft_events (event_id, draft_id, created_at) VALUES (?, ?, ?)",
+                            (message_id, draft_id, now()),
+                        )
+                except sqlite3.IntegrityError:
+                    continue
+
+                config = json.loads(pending["config_json"])
+                try:
+                    subscribed = await check_subscription(sender_id, pending["access_token"])
+                    if subscribed:
+                        reply_text = draft_value(config, "after_subscription_message", "afterSubscriptionMessage", "").strip()
+                        reply_button = draft_value(config, "after_subscription_button", "afterSubscriptionButton", "").strip()
+                        reply_url = draft_value(config, "after_subscription_url", "afterSubscriptionUrl", "").strip()
+                        if not reply_text:
+                            raise InstagramError("After-subscription message is empty")
+                        await send_direct_message(
+                            ig_user_id,
+                            sender_id,
+                            reply_text,
+                            pending["access_token"],
+                            reply_button,
+                            reply_url,
+                        )
+                        with connection() as db:
+                            db.execute(
+                                "DELETE FROM pending_subscription_checks WHERE ig_user_id = ? AND sender_id = ? AND draft_id = ?",
+                                (ig_user_id, sender_id, draft_id),
+                            )
+                        logger.info("Subscription confirmed; after-subscription message sent: draft=%s sender=%s", draft_id, sender_id)
+                    else:
+                        reply_text = draft_value(config, "no_subscription_message", "noSubscriptionMessage", "").strip()
+                        reply_button = draft_value(config, "no_subscription_button", "noSubscriptionButton", "Check follow").strip() or "Check follow"
+                        if not reply_text:
+                            raise InstagramError("Not-subscribed message is empty")
+                        await send_direct_message(
+                            ig_user_id,
+                            sender_id,
+                            reply_text,
+                            pending["access_token"],
+                            reply_button,
+                            "",
+                            quick_reply_payload,
+                        )
+                        logger.info("Subscription not detected yet; confirmation remains pending: draft=%s sender=%s", draft_id, sender_id)
+                except InstagramError:
+                    logger.exception("Could not process subscription confirmation: draft=%s sender=%s", draft_id, sender_id)
+                    with connection() as db:
+                        db.execute(
+                            "DELETE FROM processed_draft_events WHERE event_id = ? AND draft_id = ?",
+                            (message_id, draft_id),
+                        )
+                continue
+
+            if not message_text:
                 continue
 
             # Direct-message rules use the reserved post id. The existing
@@ -768,10 +861,26 @@ async def instagram_webhook(request: Request) -> dict:
                         if subscribed
                         else ""
                     ).strip()
+                    reply_payload = ""
+                    if subscribed:
+                        with connection() as db:
+                            db.execute(
+                                "DELETE FROM pending_subscription_checks WHERE ig_user_id = ? AND sender_id = ? AND draft_id = ?",
+                                (ig_user_id, sender_id, draft["id"]),
+                            )
+                    else:
+                        reply_button = reply_button or "Check follow"
+                        reply_payload = f"SA_CHECK_SUBSCRIPTION:{draft['id']}"
+                        with connection() as db:
+                            db.execute(
+                                "INSERT OR REPLACE INTO pending_subscription_checks (ig_user_id, sender_id, draft_id, session_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                                (ig_user_id, sender_id, draft["id"], canonical_session_id, now()),
+                            )
                 else:
                     reply_text = draft_value(config, "welcome_message", "welcomeMessage", "").strip()
                     reply_button = draft_value(config, "welcome_button", "welcomeButton", "").strip()
                     reply_url = ""
+                    reply_payload = ""
                 if not reply_text:
                     continue
                 try:
@@ -790,6 +899,7 @@ async def instagram_webhook(request: Request) -> dict:
                         draft["access_token"],
                         reply_button,
                         reply_url,
+                        reply_payload,
                     )
                     logger.info("Form Instagram DM reply sent: sender=%s message_id=%s", sender_id, message_id)
                 except InstagramError:

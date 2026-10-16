@@ -145,6 +145,7 @@ async def send_direct_message(
     token: str,
     button_text: str = "",
     button_url: str = "",
+    button_payload: str = "SOCIAL_AUTOMATION_REPLY",
 ) -> None:
     """Send a DM through Instagram's Send API.
 
@@ -180,7 +181,7 @@ async def send_direct_message(
                 payload["message"]["quick_replies"] = [{
                     "content_type": "text",
                     "title": button_text.strip()[:20],
-                    "payload": "SOCIAL_AUTOMATION_REPLY",
+                    "payload": button_payload[:1000],
                 }]
             response = await client.post(
                 f"{GRAPH_URL}/me/messages",
