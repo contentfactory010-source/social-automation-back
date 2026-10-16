@@ -126,7 +126,7 @@ class AutomationDraftInput(BaseModel):
     post_scope: Literal["all", "selected"]
     post_ids: list[str] = Field(max_length=500)
     welcome_message: str = Field(min_length=1, max_length=500)
-    welcome_button: str = Field(min_length=1, max_length=50)
+    welcome_button: str = Field(max_length=50)
     welcome_image: Optional[str] = None
     no_subscription_message: str = Field(max_length=500)
     no_subscription_button: str = Field(max_length=50)
@@ -158,10 +158,10 @@ def validate_draft(data: AutomationDraftInput) -> None:
     if "comment" in data.triggers and data.comment_mode == "keywords" and (not data.keywords or any(not word.strip() or len(word) > 200 for word in data.keywords)):
         raise HTTPException(422, "Enter at least one keyword, up to 200 characters each")
     if data.check_subscription and not all([
-        data.no_subscription_message.strip(), data.no_subscription_button.strip(), data.after_subscription_message.strip()
+        data.no_subscription_message.strip(), data.after_subscription_message.strip()
     ]):
         raise HTTPException(422, "Complete subscription messages")
-    if not data.welcome_message.strip() or not data.welcome_button.strip():
+    if not data.welcome_message.strip():
         raise HTTPException(422, "Complete the welcome message")
     if data.welcome_image:
         try:
