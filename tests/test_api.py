@@ -17,7 +17,7 @@ def test_connection_posts_rules_and_comment_reply(tmp_path, monkeypatch):
     monkeypatch.setenv("INSTAGRAM_REDIRECT_URI", "http://localhost:8000/api/auth/instagram/callback")
     monkeypatch.setenv("INSTAGRAM_WEBHOOK_VERIFY_TOKEN", "verify-me")
 
-    with TestClient(app) as client:
+    with TestClient(app, base_url="https://testserver") as client:
         assert client.get("/api/connection").json() == {"connected": False}
         start = client.get("/api/auth/instagram/start", follow_redirects=False)
         assert start.status_code == 302
@@ -135,4 +135,19 @@ def test_connection_posts_rules_and_comment_reply(tmp_path, monkeypatch):
         ).status_code == 200
         assert client.get("/api/connection").json() == {"connected": False}
         with connection() as db:
-            assert db.execute("SELECT count(*) FROM automation_drafts").fetchone()[0] == 0
+            assert db.execute("SELECT count(*) FROM automation_drafts").fetchone()[0] == 2
+            assert db.execute("SELECT access_token FROM sessions WHERE ig_user_id = ?", ("ig-1",)).fetchone()[0] is None
+        disconnected_event = {"entry": [{"id": "ig-1", "changes": [{"field": "comments", "value": {
+            "id": "comment-after-disconnect", "media": {"id": "post-1"}, "text": "Hello again"
+        }}]}]}
+        disconnected_body = json.dumps(disconnected_event).encode()
+        disconnected_signature = "sha256=" + hmac.new(b"test-secret", disconnected_body, hashlib.sha256).hexdigest()
+        with patch("main.reply_to_comment", new_callable=AsyncMock) as reply, patch(
+            "main.send_direct_message", new_callable=AsyncMock
+        ) as message:
+            assert client.post(
+                "/api/webhooks/instagram", content=disconnected_body,
+                headers={"X-Hub-Signature-256": disconnected_signature},
+            ).status_code == 200
+            reply.assert_not_awaited()
+            message.assert_not_awaited()

@@ -143,6 +143,49 @@ def get_session(request: Request) -> sqlite3.Row:
     return row
 
 
+def connect_account(db, ig_user_id: str, username: str, access_token: str,
+                    token_expires_at: Optional[str], candidate_session_id: Optional[str] = None) -> str:
+    candidate = db.execute(
+        "SELECT ig_user_id FROM sessions WHERE id = ?", (candidate_session_id,)
+    ).fetchone() if candidate_session_id else None
+
+    duplicate = db.execute(
+        """SELECT post_id FROM automations
+           WHERE session_id IN (SELECT id FROM sessions WHERE ig_user_id = ?)
+           GROUP BY post_id HAVING COUNT(*) > 1 LIMIT 1""",
+        (ig_user_id,),
+    ).fetchone()
+    if duplicate:
+        raise HTTPException(409, "Duplicate saved rules for an Instagram post need to be resolved")
+
+    # Rotate the session so an old cookie or bearer ID cannot become valid again.
+    session_id = candidate_session_id if candidate and not candidate["ig_user_id"] else secrets.token_urlsafe(32)
+    db.execute("INSERT OR IGNORE INTO sessions (id) VALUES (?)", (session_id,))
+
+    if candidate and candidate["ig_user_id"] and candidate["ig_user_id"] != ig_user_id:
+        previous_account = candidate["ig_user_id"]
+        db.execute("DELETE FROM pending_subscription_checks WHERE ig_user_id = ?", (previous_account,))
+        db.execute(
+            "UPDATE sessions SET access_token = NULL, token_expires_at = NULL WHERE ig_user_id = ?",
+            (previous_account,),
+        )
+
+    sources = db.execute("SELECT id FROM sessions WHERE ig_user_id = ? AND id != ?", (ig_user_id, session_id)).fetchall()
+    for source in sources:
+        old_id = source["id"]
+        db.execute("UPDATE automations SET session_id = ? WHERE session_id = ?", (session_id, old_id))
+        db.execute("UPDATE automation_drafts SET session_id = ? WHERE session_id = ?", (session_id, old_id))
+        db.execute("UPDATE pending_subscription_checks SET session_id = ? WHERE session_id = ?", (session_id, old_id))
+        db.execute("DELETE FROM sessions WHERE id = ?", (old_id,))
+
+    db.execute(
+        """UPDATE sessions SET ig_user_id = ?, username = ?, access_token = ?,
+           token_expires_at = ?, connected_at = ? WHERE id = ?""",
+        (ig_user_id, username, access_token, token_expires_at, now(), session_id),
+    )
+    return session_id
+
+
 def require_browser_request(request: Request, x_requested_with: Optional[str] = Header(None)) -> None:
     if x_requested_with != "XMLHttpRequest":
         raise HTTPException(403, "Missing request header")
@@ -299,47 +342,14 @@ async def instagram_callback(request: Request, code: str = "", state: str = "", 
         instagram_user_id,
         profile.get("username", ""),
     )
-    with connection() as db:
-        previous = db.execute("SELECT ig_user_id, username FROM sessions WHERE id = ?", (session_id,)).fetchone()
-        if (
-            previous
-            and previous["ig_user_id"]
-            and previous["ig_user_id"] != instagram_user_id
-            and previous["username"] != profile.get("username", "")
-        ):
-            db.execute("DELETE FROM automations WHERE session_id = ?", (session_id,))
-            db.execute("DELETE FROM automation_drafts WHERE session_id = ?", (session_id,))
-        # A reconnect can create a new browser session. Remove stale data for
-        # the same Instagram account so webhooks cannot trigger hidden rules
-        # from an older session in addition to the current rules.
-        stale_sessions = db.execute(
-            "SELECT id FROM sessions WHERE ig_user_id = ? AND id != ?",
-            (instagram_user_id, session_id),
-        ).fetchall()
-        for stale in stale_sessions:
-            stale_id = stale["id"]
-            db.execute(
-                "DELETE FROM processed_comments WHERE automation_id IN (SELECT id FROM automations WHERE session_id = ?)",
-                (stale_id,),
+    try:
+        with connection() as db:
+            session_id = connect_account(
+                db, instagram_user_id, profile.get("username", ""), token["access_token"],
+                token["token_expires_at"], session_id,
             )
-            db.execute(
-                "DELETE FROM processed_messages WHERE automation_id IN (SELECT id FROM automations WHERE session_id = ?)",
-                (stale_id,),
-            )
-            db.execute(
-                "DELETE FROM processed_draft_events WHERE draft_id IN (SELECT id FROM automation_drafts WHERE session_id = ?)",
-                (stale_id,),
-            )
-            db.execute("DELETE FROM automations WHERE session_id = ?", (stale_id,))
-            db.execute("DELETE FROM automation_drafts WHERE session_id = ?", (stale_id,))
-            db.execute("DELETE FROM oauth_states WHERE session_id = ?", (stale_id,))
-            db.execute("DELETE FROM sessions WHERE id = ?", (stale_id,))
-        db.execute(
-            """UPDATE sessions SET ig_user_id = ?, username = ?, access_token = ?,
-               token_expires_at = ?, connected_at = ? WHERE id = ?""",
-            (instagram_user_id, profile.get("username", ""), token["access_token"],
-             token["token_expires_at"], now(), session_id),
-        )
+    except HTTPException as exc:
+        return redirect_front(str(exc.detail), return_to)
     try:
         await subscribe_to_webhooks(instagram_user_id, token["access_token"])
         logger.info("Instagram webhooks subscribed for account %s", instagram_user_id)
@@ -430,20 +440,8 @@ async def connect_existing_instagram(data: InstagramConnectionInput, response: R
     if not instagram_user_id:
         raise HTTPException(401, "Instagram profile does not include an account ID")
 
-    timestamp = now()
     with connection() as db:
-        # Reuse the canonical account session so both frontends see its saved rules.
-        existing = db.execute(
-            "SELECT id FROM sessions WHERE ig_user_id = ? ORDER BY connected_at DESC LIMIT 1",
-            (instagram_user_id,),
-        ).fetchone()
-        session_id = existing["id"] if existing else secrets.token_urlsafe(32)
-        db.execute("INSERT OR IGNORE INTO sessions (id) VALUES (?)", (session_id,))
-        db.execute(
-            """UPDATE sessions SET ig_user_id = ?, username = ?, access_token = ?,
-               token_expires_at = NULL, connected_at = ? WHERE id = ?""",
-            (instagram_user_id, profile.get("username", ""), data.access_token, timestamp, session_id),
-        )
+        session_id = connect_account(db, instagram_user_id, profile.get("username", ""), data.access_token, None)
 
     try:
         await subscribe_to_webhooks(instagram_user_id, data.access_token)
@@ -456,7 +454,7 @@ async def connect_existing_instagram(data: InstagramConnectionInput, response: R
         "connected": True,
         "instagramUserId": instagram_user_id,
         "username": profile.get("username", ""),
-        "connectedAt": timestamp,
+        "connectedAt": now(),
         "sessionToken": session_id,
     }
 
@@ -464,12 +462,10 @@ async def connect_existing_instagram(data: InstagramConnectionInput, response: R
 @app.delete("/api/connection", dependencies=[Depends(require_browser_request)])
 def disconnect(request: Request, session: sqlite3.Row = Depends(get_session)) -> dict:
     with connection() as db:
-        db.execute("DELETE FROM automations WHERE session_id = ?", (session["id"],))
-        db.execute("DELETE FROM automation_drafts WHERE session_id = ?", (session["id"],))
+        db.execute("DELETE FROM pending_subscription_checks WHERE ig_user_id = ?", (session["ig_user_id"],))
         db.execute(
-            """UPDATE sessions SET ig_user_id = NULL, username = NULL, access_token = NULL,
-               token_expires_at = NULL, connected_at = NULL WHERE id = ?""",
-            (session["id"],),
+            "UPDATE sessions SET access_token = NULL, token_expires_at = NULL WHERE ig_user_id = ?",
+            (session["ig_user_id"],),
         )
     return {"connected": False}
 

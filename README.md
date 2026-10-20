@@ -45,6 +45,9 @@ Start the server:
 - `POST /api/webhooks/instagram` processes Instagram comments and direct messages.
 - `GET /api/health` checks service availability.
 
+Disconnect revokes account access and stops automation execution, but keeps saved
+automations. Reconnecting the same Instagram account restores its saved rules.
+
 ## Client integration
 
 A client starts OAuth at
