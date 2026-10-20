@@ -42,9 +42,9 @@ async def worker_context(request, call_next):
     try:
         origin = request.headers.get("origin")
         cors_headers = {}
-        if origin and origin.rstrip("/") == legacy.FRONTEND_URL:
+        if origin and origin.rstrip("/") in legacy.browser_origins():
             cors_headers = {
-                "Access-Control-Allow-Origin": legacy.FRONTEND_URL,
+                "Access-Control-Allow-Origin": origin,
                 "Access-Control-Allow-Credentials": "true",
                 "Vary": "Origin",
             }

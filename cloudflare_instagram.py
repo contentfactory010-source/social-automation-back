@@ -37,12 +37,12 @@ async def request(url: str, method: str = "GET", *, headers=None, body=None, par
     return response
 
 
-async def exchange_code(code: str) -> dict:
+async def exchange_code(code: str, redirect_uri: str = "") -> dict:
     form = urlencode({
         "client_id": setting("INSTAGRAM_APP_ID"),
         "client_secret": setting("INSTAGRAM_APP_SECRET"),
         "grant_type": "authorization_code",
-        "redirect_uri": setting("INSTAGRAM_REDIRECT_URI"),
+        "redirect_uri": redirect_uri or setting("INSTAGRAM_REDIRECT_URI"),
         "code": code,
     })
     headers = {"Content-Type": "application/x-www-form-urlencoded"}

@@ -40,14 +40,14 @@ def authorization_url(state: str) -> str:
     return f"{AUTHORIZE_URL}?{urlencode(params)}"
 
 
-async def exchange_code(code: str) -> dict:
+async def exchange_code(code: str, redirect_uri: str = "") -> dict:
     async with httpx.AsyncClient(timeout=20) as client:
         try:
             response = await client.post(TOKEN_URL, data={
                 "client_id": setting("INSTAGRAM_APP_ID"),
                 "client_secret": setting("INSTAGRAM_APP_SECRET"),
                 "grant_type": "authorization_code",
-                "redirect_uri": setting("INSTAGRAM_REDIRECT_URI"),
+                "redirect_uri": redirect_uri or setting("INSTAGRAM_REDIRECT_URI"),
                 "code": code,
             })
             response.raise_for_status()

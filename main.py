@@ -19,14 +19,14 @@ except ImportError:  # Cloudflare Python Workers do not provide sqlite3.
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 try:
     from dotenv import load_dotenv
 except ImportError:  # Worker variables are provided by Cloudflare bindings.
     def load_dotenv() -> None:
         return None
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
@@ -52,6 +52,20 @@ SESSION_COOKIE = "sa_session"
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "lax").lower()
+CORS_ALLOWED_ORIGINS = (
+    "http://localhost:3000",
+    "http://localhost:3007",
+    "https://app.neuro-c.ai",
+    "https://content-factory-front.web.app",
+    "https://content-factory-front.firebaseapp.com",
+    "https://content-factory-stage.web.app",
+    "https://content-factory-stage.firebaseapp.com",
+    "https://saas-dev-eb027.web.app",
+)
+
+
+def browser_origins() -> set[str]:
+    return {FRONTEND_URL, *(origin.rstrip("/") for origin in CORS_ALLOWED_ORIGINS)}
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -62,10 +76,10 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="Social Automation API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL],
+    allow_origins=list(browser_origins()),
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
-    allow_headers=["Content-Type", "X-Requested-With"],
+    allow_headers=["Content-Type", "X-Requested-With", "Authorization"],
 )
 
 
@@ -73,12 +87,34 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def redirect_front(error: Optional[str] = None) -> RedirectResponse:
+def redirect_front(error: Optional[str] = None, return_to: Optional[str] = None) -> RedirectResponse:
     query = f"?{urlencode({'error': error})}" if error else ""
-    return RedirectResponse(f"{FRONTEND_URL}/{query}", status_code=303)
+    return RedirectResponse(f"{return_to or FRONTEND_URL + '/'}{query}", status_code=303)
 
 
-def set_session_cookie(response: RedirectResponse, session_id: str) -> None:
+def valid_return_to(value: str) -> bool:
+    parsed = urlparse(value)
+    return (
+        parsed.scheme in ("http", "https")
+        and f"{parsed.scheme}://{parsed.netloc}" in browser_origins()
+        and parsed.path == "/social-automation"
+        and not parsed.username and not parsed.password
+        and not parsed.query and not parsed.fragment
+    )
+
+
+def callback_return_to(state: str) -> Optional[str]:
+    if "." not in state:
+        return None
+    try:
+        value = state.split(".", 1)[1]
+        decoded = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4)).decode()
+    except (ValueError, UnicodeDecodeError, binascii.Error):
+        return None
+    return decoded if valid_return_to(decoded) else None
+
+
+def set_session_cookie(response: Response, session_id: str) -> None:
     response.set_cookie(
         SESSION_COOKIE,
         session_id,
@@ -90,7 +126,14 @@ def set_session_cookie(response: RedirectResponse, session_id: str) -> None:
 
 
 def get_session(request: Request) -> sqlite3.Row:
-    session_id = request.cookies.get(SESSION_COOKIE)
+    authorization = request.headers.get("authorization")
+    if authorization:
+        scheme, _, session_id = authorization.partition(" ")
+        if scheme.lower() != "bearer" or not session_id.strip():
+            raise HTTPException(401, "Invalid session token")
+        session_id = session_id.strip()
+    else:
+        session_id = request.cookies.get(SESSION_COOKIE)
     if not session_id:
         raise HTTPException(401, "Connect Instagram first")
     with connection() as db:
@@ -104,8 +147,21 @@ def require_browser_request(request: Request, x_requested_with: Optional[str] = 
     if x_requested_with != "XMLHttpRequest":
         raise HTTPException(403, "Missing request header")
     origin = request.headers.get("origin")
-    if origin and origin.rstrip("/") != FRONTEND_URL:
+    if origin and origin.rstrip("/") not in browser_origins():
         raise HTTPException(403, "Invalid origin")
+
+
+class InstagramConnectionInput(BaseModel):
+    access_token: str = Field(min_length=1, max_length=4096, repr=False)
+
+
+class InstagramCodeInput(BaseModel):
+    code: str = Field(min_length=1, max_length=4096, repr=False)
+    redirect_uri: str = Field(min_length=1, max_length=2048)
+
+
+class InstagramHandoffInput(BaseModel):
+    ticket: str = Field(min_length=1, max_length=256)
 
 
 class AutomationInput(BaseModel):
@@ -188,9 +244,13 @@ def health() -> dict:
 
 
 @app.get("/api/auth/instagram/start")
-def instagram_start(request: Request) -> RedirectResponse:
+def instagram_start(request: Request, return_to: str = "") -> RedirectResponse:
+    if return_to and (len(return_to) > 2048 or not valid_return_to(return_to)):
+        raise HTTPException(400, "Invalid return URL")
     try:
         state = secrets.token_urlsafe(32)
+        if return_to:
+            state += "." + base64.urlsafe_b64encode(return_to.encode()).decode().rstrip("=")
         session_id = request.cookies.get(SESSION_COOKIE) or secrets.token_urlsafe(32)
         with connection() as db:
             db.execute("INSERT OR IGNORE INTO sessions (id) VALUES (?)", (session_id,))
@@ -207,24 +267,28 @@ def instagram_start(request: Request) -> RedirectResponse:
 
 @app.get("/api/auth/instagram/callback")
 async def instagram_callback(request: Request, code: str = "", state: str = "", error: str = "") -> RedirectResponse:
-    if error:
-        return redirect_front("Instagram authorization was cancelled")
+    return_to = callback_return_to(state)
     session_id = request.cookies.get(SESSION_COOKIE)
-    if not code or not state or not session_id:
-        return redirect_front("Instagram authorization response is incomplete")
+    if not state or not session_id:
+        return redirect_front("Instagram authorization response is incomplete", return_to)
 
     with connection() as db:
         saved = db.execute("SELECT * FROM oauth_states WHERE state = ? AND session_id = ?", (state, session_id)).fetchone()
         db.execute("DELETE FROM oauth_states WHERE state = ?", (state,))
     if not saved or datetime.fromisoformat(saved["created_at"]) < datetime.now(timezone.utc) - timedelta(minutes=10):
-        return redirect_front("Instagram authorization expired. Try again")
+        return redirect_front("Instagram authorization expired. Try again", return_to)
+
+    if error:
+        return redirect_front("Instagram authorization was cancelled", return_to)
+    if not code:
+        return redirect_front("Instagram authorization response is incomplete", return_to)
 
     try:
         token = await exchange_code(code)
         profile = await get_profile(token["access_token"])
     except InstagramError as exc:
         logger.warning("Instagram connection failed: %s", exc)
-        return redirect_front(str(exc))
+        return redirect_front(str(exc), return_to)
 
     # Webhooks identify the professional account with `/me.user_id`.
     # `/me.id` is app-scoped and does not match the webhook entry ID.
@@ -283,9 +347,39 @@ async def instagram_callback(request: Request, code: str = "", state: str = "", 
         # A connected account is still useful if webhook subscription needs
         # to be completed in Meta Developer or the account lacks a permission.
         logger.warning("Instagram webhook subscription failed: %s", exc)
-    response = redirect_front()
+    if return_to:
+        ticket = "handoff." + secrets.token_urlsafe(32)
+        with connection() as db:
+            db.execute(
+                "INSERT INTO oauth_states (state, session_id, created_at) VALUES (?, ?, ?)",
+                (ticket, session_id, now()),
+            )
+        response = RedirectResponse(f"{return_to}?{urlencode({'sa_ticket': ticket})}", status_code=303)
+        response.headers["Cache-Control"] = "no-store"
+    else:
+        response = redirect_front()
     set_session_cookie(response, session_id)
     return response
+
+
+@app.post("/api/auth/instagram/claim", dependencies=[Depends(require_browser_request)])
+def claim_instagram_handoff(data: InstagramHandoffInput, response: Response) -> dict:
+    if not data.ticket.startswith("handoff."):
+        raise HTTPException(400, "Invalid handoff ticket")
+    with connection() as db:
+        row = db.execute("SELECT session_id, created_at FROM oauth_states WHERE state = ?", (data.ticket,)).fetchone()
+        deleted = db.execute("DELETE FROM oauth_states WHERE state = ?", (data.ticket,))
+        session = db.execute("SELECT * FROM sessions WHERE id = ?", (row["session_id"],)).fetchone() if row and deleted.rowcount == 1 else None
+    if not row or deleted.rowcount != 1 or not session or not session["access_token"] or datetime.fromisoformat(row["created_at"]) < datetime.now(timezone.utc) - timedelta(minutes=5):
+        raise HTTPException(400, "Invalid or expired handoff ticket")
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "connected": True,
+        "instagramUserId": session["ig_user_id"],
+        "username": session["username"],
+        "connectedAt": session["connected_at"],
+        "sessionToken": session["id"],
+    }
 
 
 @app.get("/api/connection")
@@ -299,6 +393,71 @@ def get_connection(request: Request) -> dict:
         "instagramUserId": session["ig_user_id"],
         "username": session["username"],
         "connectedAt": session["connected_at"],
+    }
+
+
+@app.post("/api/auth/instagram/exchange", dependencies=[Depends(require_browser_request)])
+async def exchange_content_factory_code(data: InstagramCodeInput, response: Response) -> dict:
+    redirect = urlparse(data.redirect_uri)
+    origin = f"{redirect.scheme}://{redirect.netloc}"
+    if (
+        origin not in browser_origins()
+        or redirect.path.rstrip("/") != "/social-automation"
+        or redirect.query
+        or redirect.fragment
+    ):
+        raise HTTPException(403, "Invalid Content Factory redirect URI")
+    try:
+        token = await exchange_code(data.code, data.redirect_uri)
+    except InstagramError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "accessToken": token["access_token"],
+        "instagramUserId": str(token["ig_user_id"]),
+        "connectedAt": now(),
+    }
+
+
+@app.post("/api/connection", dependencies=[Depends(require_browser_request)])
+async def connect_existing_instagram(data: InstagramConnectionInput, response: Response) -> dict:
+    try:
+        profile = await get_profile(data.access_token)
+    except InstagramError as exc:
+        raise HTTPException(401, "Could not verify Instagram credentials. Reconnect Instagram.") from exc
+
+    instagram_user_id = str(profile.get("user_id") or profile.get("id") or "")
+    if not instagram_user_id:
+        raise HTTPException(401, "Instagram profile does not include an account ID")
+
+    timestamp = now()
+    with connection() as db:
+        # Reuse the canonical account session so both frontends see its saved rules.
+        existing = db.execute(
+            "SELECT id FROM sessions WHERE ig_user_id = ? ORDER BY connected_at DESC LIMIT 1",
+            (instagram_user_id,),
+        ).fetchone()
+        session_id = existing["id"] if existing else secrets.token_urlsafe(32)
+        db.execute("INSERT OR IGNORE INTO sessions (id) VALUES (?)", (session_id,))
+        db.execute(
+            """UPDATE sessions SET ig_user_id = ?, username = ?, access_token = ?,
+               token_expires_at = NULL, connected_at = ? WHERE id = ?""",
+            (instagram_user_id, profile.get("username", ""), data.access_token, timestamp, session_id),
+        )
+
+    try:
+        await subscribe_to_webhooks(instagram_user_id, data.access_token)
+    except InstagramError as exc:
+        logger.warning("Instagram webhook subscription failed: %s", exc)
+
+    set_session_cookie(response, session_id)
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "connected": True,
+        "instagramUserId": instagram_user_id,
+        "username": profile.get("username", ""),
+        "connectedAt": timestamp,
+        "sessionToken": session_id,
     }
 
 
@@ -344,7 +503,11 @@ def automation_drafts(session: sqlite3.Row = Depends(get_session)) -> dict:
 
 
 @app.post("/api/automation-drafts", status_code=201, dependencies=[Depends(require_browser_request)])
-async def create_automation_draft(data: AutomationDraftInput, session: sqlite3.Row = Depends(get_session)) -> dict:
+async def create_automation_draft(
+    data: AutomationDraftInput,
+    session: sqlite3.Row = Depends(get_session),
+    replace_automation_id: str = "",
+) -> dict:
     validate_draft(data)
     if data.post_ids:
         try:
@@ -357,10 +520,21 @@ async def create_automation_draft(data: AutomationDraftInput, session: sqlite3.R
     draft_id = secrets.token_urlsafe(16)
     timestamp = now()
     with connection() as db:
+        enabled = 1
+        if replace_automation_id:
+            previous = db.execute(
+                "SELECT enabled FROM automations WHERE id = ? AND session_id = ?",
+                (replace_automation_id, session["id"]),
+            ).fetchone()
+            if not previous:
+                raise HTTPException(404, "Automation not found")
+            enabled = previous["enabled"]
         db.execute(
-            "INSERT INTO automation_drafts (id, session_id, config_json, enabled, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?)",
-            (draft_id, session["id"], data.model_dump_json(), timestamp, timestamp),
+            "INSERT INTO automation_drafts (id, session_id, config_json, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (draft_id, session["id"], data.model_dump_json(), enabled, timestamp, timestamp),
         )
+        if replace_automation_id:
+            db.execute("DELETE FROM automations WHERE id = ? AND session_id = ?", (replace_automation_id, session["id"]))
         row = db.execute("SELECT * FROM automation_drafts WHERE id = ?", (draft_id,)).fetchone()
     return draft_row(row)
 

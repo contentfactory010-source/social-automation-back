@@ -35,6 +35,7 @@ Start the server:
 - `GET /api/auth/instagram/start` starts Instagram OAuth.
 - `GET /api/auth/instagram/callback` completes OAuth and stores the long-lived token.
 - `GET /api/connection`, `DELETE /api/connection` manage the connected account.
+- `POST /api/connection` verifies an existing Instagram access token and returns a session for a client.
 - `GET /api/posts` loads Instagram media.
 - `GET /api/automations`, `PUT /api/automations/{post_id}`, `DELETE /api/automations/{post_id}` manage simple automations.
 - `GET /api/automation-drafts`, `POST /api/automation-drafts` manage form automations.
@@ -43,6 +44,24 @@ Start the server:
 - `GET /api/webhooks/instagram` verifies Meta webhook configuration.
 - `POST /api/webhooks/instagram` processes Instagram comments and direct messages.
 - `GET /api/health` checks service availability.
+
+## Client integration
+
+A client starts OAuth at
+`GET /api/auth/instagram/start?return_to=<client-origin>/social-automation`.
+Add its origin to `CORS_ALLOWED_ORIGINS` in `main.py`; `FRONTEND_URL` is allowed
+automatically. Meta's registered callback must still be `INSTAGRAM_REDIRECT_URI`.
+
+After OAuth, the backend redirects with a short-lived `sa_ticket`, not an
+Instagram token. Claim it once via `POST /api/auth/instagram/claim` with
+`X-Requested-With: XMLHttpRequest`, then use the returned `sessionToken` as
+`Authorization: Bearer <sessionToken>`. The standalone frontend continues to
+use cookie authentication. Keep Instagram credentials on the backend.
+
+`/api/auth/instagram/exchange` and `POST /api/connection` remain for compatibility.
+To edit a simple rule in the full form, create a draft with
+`POST /api/automation-drafts?replace_automation_id=<rule-id>`; this replaces
+the original rule without activating a duplicate.
 
 Configure the webhook callback URL in Meta Developer:
 

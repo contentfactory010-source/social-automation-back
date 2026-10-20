@@ -15,8 +15,9 @@ def _to_python(value):
 
 
 class Cursor:
-    def __init__(self, rows=None):
+    def __init__(self, rows=None, rowcount=-1):
         self.rows = [_to_python(row) for row in (rows or [])]
+        self.rowcount = rowcount
 
     def fetchone(self):
         return self.rows[0] if self.rows else None
@@ -37,8 +38,9 @@ class Connection:
             if sql.lstrip().upper().startswith(("SELECT", "PRAGMA", "WITH")):
                 result = _to_python(run_sync(statement.all()))
                 return Cursor(result.get("results", []) if isinstance(result, dict) else [])
-            run_sync(statement.run())
-            return Cursor()
+            result = _to_python(run_sync(statement.run()))
+            meta = result.get("meta", {}) if isinstance(result, dict) else {}
+            return Cursor(rowcount=meta.get("changes", 0))
         except Exception as exc:
             if "UNIQUE" in str(exc).upper() or "CONSTRAINT" in str(exc).upper():
                 raise IntegrityError(str(exc)) from exc
