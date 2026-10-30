@@ -13,7 +13,6 @@
     }
   ],
   "vars": {
-    "CONTENT_FACTORY_API_BASE_URL": "https://api.neuro-x.online/api",
     "FRONTEND_URL": "https://sa-neuro-c.web.app",
     "PUBLIC_BACKEND_URL": "https://social-automation-back.contentfactory010.workers.dev",
     "INSTAGRAM_REDIRECT_URI": "https://social-automation-back.contentfactory010.workers.dev/api/auth/instagram/callback",

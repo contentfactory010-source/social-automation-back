@@ -300,10 +300,11 @@ def health() -> dict:
 
 @app.post("/api/auth/instagram/prepare", dependencies=[Depends(require_browser_request)])
 async def prepare_cf_oauth(data: CfOAuthPrepareInput, response: Response,
+                           request: Request,
                            authorization: Optional[str] = Header(None)) -> dict:
     if not valid_return_to(data.return_to):
         raise HTTPException(400, "Invalid return URL")
-    cf_user_id = await verify_cf_access_token(cf_bearer_token(authorization))
+    cf_user_id = await verify_cf_access_token(cf_bearer_token(authorization), request.headers.get("origin", ""))
     ticket = "prepare." + secrets.token_urlsafe(32)
     session_id = secrets.token_urlsafe(32)
     with connection() as db:
@@ -318,8 +319,8 @@ async def prepare_cf_oauth(data: CfOAuthPrepareInput, response: Response,
 
 
 @app.post("/api/client/session", dependencies=[Depends(require_browser_request)])
-async def cf_client_session(response: Response, authorization: Optional[str] = Header(None)) -> dict:
-    cf_user_id = await verify_cf_access_token(cf_bearer_token(authorization))
+async def cf_client_session(request: Request, response: Response, authorization: Optional[str] = Header(None)) -> dict:
+    cf_user_id = await verify_cf_access_token(cf_bearer_token(authorization), request.headers.get("origin", ""))
     with connection() as db:
         row = db.execute(
             """SELECT s.id, s.ig_user_id, s.username, s.connected_at
@@ -453,13 +454,14 @@ async def instagram_callback(request: Request, code: str = "", state: str = "", 
 
 @app.post("/api/auth/instagram/claim", dependencies=[Depends(require_browser_request)])
 async def claim_instagram_handoff(data: InstagramHandoffInput, response: Response,
+                                 request: Request,
                                  authorization: Optional[str] = Header(None)) -> dict:
     if not data.ticket.startswith("handoff."):
         raise HTTPException(400, "Invalid handoff ticket")
     with connection() as db:
         row = db.execute("SELECT session_id, created_at, cf_user_id FROM oauth_states WHERE state = ?", (data.ticket,)).fetchone()
     if row and row["cf_user_id"]:
-        cf_user_id = await verify_cf_access_token(cf_bearer_token(authorization))
+        cf_user_id = await verify_cf_access_token(cf_bearer_token(authorization), request.headers.get("origin", ""))
         if cf_user_id != row["cf_user_id"]:
             raise HTTPException(403, "Content Factory user does not match the OAuth connection")
     with connection() as db:

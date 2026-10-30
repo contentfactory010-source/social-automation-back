@@ -3,15 +3,13 @@
 from fastapi import HTTPException
 from workers import fetch
 
-from cloudflare_config import value
+from cf_bridge import cf_api_base_url
 
 
-async def verify_cf_access_token(token: str) -> str:
+async def verify_cf_access_token(token: str, origin: str = "") -> str:
     if not token:
         raise HTTPException(401, "Content Factory login is required")
-    api_url = value("CONTENT_FACTORY_API_BASE_URL").rstrip("/")
-    if not api_url.startswith("https://"):
-        raise HTTPException(503, "Content Factory API URL is not configured")
+    api_url = cf_api_base_url(origin)
     try:
         response = await fetch(f"{api_url}/auth/me", headers={"Authorization": f"Bearer {token}"})
     except Exception as exc:

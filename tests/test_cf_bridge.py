@@ -20,15 +20,19 @@ TOKEN_B = "other-user-token"
 
 
 def test_cf_token_is_checked_by_existing_me_endpoint(tmp_path, monkeypatch):
-    monkeypatch.setenv("CONTENT_FACTORY_API_BASE_URL", "https://cf.example/api")
+    requested_urls = []
     def respond(request):
-        assert str(request.url) == "https://cf.example/api/auth/me"
+        requested_urls.append(str(request.url))
         assert request.headers["authorization"] == "Bearer cf-token"
         return httpx.Response(200, json={"user_id": "user-a"})
     original_client = httpx.AsyncClient
-    client = original_client(transport=httpx.MockTransport(respond))
-    with patch("cf_bridge.httpx.AsyncClient", return_value=client):
-        assert asyncio.run(verify_cf_access_token("cf-token")) == "user-a"
+    with patch("cf_bridge.httpx.AsyncClient", side_effect=lambda **kwargs: original_client(transport=httpx.MockTransport(respond), **kwargs)):
+        assert asyncio.run(verify_cf_access_token("cf-token", "https://content-factory-stage.firebaseapp.com")) == "user-a"
+        assert asyncio.run(verify_cf_access_token("cf-token", "https://app.neuro-c.ai")) == "user-a"
+    assert requested_urls == [
+        "https://stage.neuro-x.online/api/auth/me",
+        "https://api.neuro-x.online/api/auth/me",
+    ]
 
     denied = original_client(transport=httpx.MockTransport(lambda request: httpx.Response(401)))
     with patch("cf_bridge.httpx.AsyncClient", return_value=denied):
@@ -45,7 +49,8 @@ def test_cf_login_is_bound_at_oauth_and_restored_on_another_device(tmp_path, mon
     monkeypatch.setenv("INSTAGRAM_APP_ID", "test-app")
     monkeypatch.setenv("INSTAGRAM_APP_SECRET", "test-secret")
     monkeypatch.setenv("INSTAGRAM_REDIRECT_URI", "http://localhost:8000/api/auth/instagram/callback")
-    async def verify(token):
+    async def verify(token, origin):
+        assert origin == HEADERS["Origin"]
         if token in (TOKEN_A, TOKEN_A_OTHER_DEVICE):
             return "user-a"
         if token == TOKEN_B:

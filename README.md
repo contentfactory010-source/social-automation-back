@@ -20,7 +20,6 @@ INSTAGRAM_APP_ID=
 INSTAGRAM_APP_SECRET=
 INSTAGRAM_REDIRECT_URI=http://localhost:8000/api/auth/instagram/callback
 INSTAGRAM_WEBHOOK_VERIFY_TOKEN=
-CONTENT_FACTORY_API_BASE_URL=https://stage.neuro-x.online/api
 FRONTEND_URL=http://localhost:5173
 COOKIE_SECURE=false
 ```

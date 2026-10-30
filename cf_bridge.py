@@ -1,7 +1,5 @@
 """Resolve a Content Factory user through its existing authenticated API."""
 
-import os
-
 try:
     import httpx
 except ImportError:  # Cloudflare uses the Worker Fetch API instead.
@@ -9,12 +7,28 @@ except ImportError:  # Cloudflare uses the Worker Fetch API instead.
 from fastapi import HTTPException
 
 
-async def verify_cf_access_token(token: str) -> str:
+STAGE_CLIENT_ORIGINS = frozenset({
+    "https://content-factory-stage.web.app",
+    "https://content-factory-stage.firebaseapp.com",
+    "https://saas-dev-eb027.web.app",
+    "http://localhost:3000",
+    "http://localhost:3007",
+})
+
+CONTENT_FACTORY_API_URLS = (
+    "https://api.neuro-x.online/api",  # production
+    "https://stage.neuro-x.online/api",  # staging
+)
+
+
+def cf_api_base_url(origin: str) -> str:
+    return CONTENT_FACTORY_API_URLS[1 if origin in STAGE_CLIENT_ORIGINS else 0]
+
+
+async def verify_cf_access_token(token: str, origin: str = "") -> str:
     if not token:
         raise HTTPException(401, "Content Factory login is required")
-    api_url = os.getenv("CONTENT_FACTORY_API_BASE_URL", "").rstrip("/")
-    if not api_url.startswith("https://") and not api_url.startswith("http://localhost:"):
-        raise HTTPException(503, "Content Factory API URL is not configured")
+    api_url = cf_api_base_url(origin)
     try:
         async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
             response = await client.get(f"{api_url}/auth/me", headers={"Authorization": f"Bearer {token}"})
