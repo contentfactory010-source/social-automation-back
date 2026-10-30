@@ -9,7 +9,7 @@ from cloudflare_config import value
 async def verify_cf_access_token(token: str) -> str:
     if not token:
         raise HTTPException(401, "Content Factory login is required")
-    api_url = value("CF_API_BASE_URL").rstrip("/")
+    api_url = value("CONTENT_FACTORY_API_BASE_URL").rstrip("/")
     if not api_url.startswith("https://"):
         raise HTTPException(503, "Content Factory API URL is not configured")
     try:

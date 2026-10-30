@@ -20,7 +20,7 @@ TOKEN_B = "other-user-token"
 
 
 def test_cf_token_is_checked_by_existing_me_endpoint(tmp_path, monkeypatch):
-    monkeypatch.setenv("CF_API_BASE_URL", "https://cf.example/api")
+    monkeypatch.setenv("CONTENT_FACTORY_API_BASE_URL", "https://cf.example/api")
     def respond(request):
         assert str(request.url) == "https://cf.example/api/auth/me"
         assert request.headers["authorization"] == "Bearer cf-token"

@@ -12,7 +12,7 @@ from fastapi import HTTPException
 async def verify_cf_access_token(token: str) -> str:
     if not token:
         raise HTTPException(401, "Content Factory login is required")
-    api_url = os.getenv("CF_API_BASE_URL", "").rstrip("/")
+    api_url = os.getenv("CONTENT_FACTORY_API_BASE_URL", "").rstrip("/")
     if not api_url.startswith("https://") and not api_url.startswith("http://localhost:"):
         raise HTTPException(503, "Content Factory API URL is not configured")
     try:
