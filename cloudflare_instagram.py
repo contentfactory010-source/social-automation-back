@@ -5,7 +5,7 @@ from urllib.parse import urlencode
 from workers import fetch
 
 from cloudflare_config import setting, value
-from instagram import InstagramError
+from instagram import InstagramError, invalid_message_data, plain_private_reply
 
 
 AUTHORIZE_URL = "https://www.instagram.com/oauth/authorize"
@@ -147,12 +147,21 @@ async def send_direct_message(
             "title": button_text.strip()[:20],
             "payload": button_payload[:1000],
         }]
-    response = await request(
-        f"{GRAPH_URL}/{ig_user_id if comment_id else 'me'}/messages",
-        "POST",
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
-        body=json.dumps(payload),
-    )
+    url = f"{GRAPH_URL}/{ig_user_id if comment_id else 'me'}/messages"
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
+    try:
+        response = await request(url, "POST", headers=headers, body=json.dumps(payload))
+    except InstagramError as exc:
+        if not comment_id or not (button_text.strip() or button_url.strip()) or not invalid_message_data(str(exc)):
+            raise
+        import logging
+        logging.getLogger("uvicorn.error").warning(
+            "Instagram rejected interactive private reply; retrying as text: comment_id=%s", comment_id
+        )
+        response = await request(
+            url, "POST", headers=headers,
+            body=json.dumps({"recipient": recipient, "message": {"text": plain_private_reply(message, button_text, button_url)}}),
+        )
     result = await response.json()
     return str(result.get("recipient_id") or recipient_id)
 

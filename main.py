@@ -969,8 +969,11 @@ async def instagram_webhook(request: Request) -> dict:
                         else:
                             logger.warning("Private reply sent without a recipient ID; follow check unavailable: comment_id=%s", comment_id)
                     logger.info("Instagram private reply sent: comment_id=%s draft=%s", comment_id, draft["id"])
-                except InstagramError:
-                    logger.exception("Could not send automation message for comment %s", comment_id)
+                except InstagramError as exc:
+                    logger.error(
+                        "Could not send automation message for comment %s: %s",
+                        comment_id, exc,
+                    )
                     with connection() as db:
                         db.execute(
                             "DELETE FROM processed_draft_events WHERE event_id = ? AND draft_id = ?",
@@ -993,6 +996,26 @@ async def instagram_webhook(request: Request) -> dict:
             )
             if not message_id or not sender_id or sender_id == ig_user_id:
                 continue
+
+            # Interactive private replies are not accepted for every account.
+            # A plain-text fallback asks the customer to type the button label.
+            if not quick_reply_payload and message_text:
+                with connection() as db:
+                    pending_checks = db.execute(
+                        """SELECT p.draft_id, d.config_json
+                           FROM pending_subscription_checks p
+                           JOIN automation_drafts d ON d.id = p.draft_id AND d.enabled = 1
+                           WHERE p.ig_user_id = ? AND p.sender_id = ? AND p.session_id = ?""",
+                        (ig_user_id, sender_id, canonical_session_id),
+                    ).fetchall()
+                for pending_check in pending_checks:
+                    pending_config = json.loads(pending_check["config_json"])
+                    button_label = draft_value(
+                        pending_config, "no_subscription_button", "noSubscriptionButton", "Check follow"
+                    ).strip() or "Check follow"
+                    if message_text.casefold() == button_label.casefold():
+                        quick_reply_payload = f"SA_CHECK_SUBSCRIPTION:{pending_check['draft_id']}"
+                        break
 
             if quick_reply_payload.startswith("SA_CHECK_SUBSCRIPTION:"):
                 draft_id = quick_reply_payload.partition(":")[2]

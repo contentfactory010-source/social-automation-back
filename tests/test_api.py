@@ -73,6 +73,72 @@ def test_worker_private_reply_uses_instagram_account_and_comment_id(tmp_path, mo
     assert json.loads(calls[1][1]["body"])["recipient"] == {"id": "commenter-1"}
 
 
+def test_private_reply_retries_without_interactive_content_on_meta_2534015(tmp_path, monkeypatch):
+    calls = []
+
+    def respond(request):
+        calls.append(json.loads(request.content))
+        if len(calls) == 1:
+            return httpx.Response(400, json={"error": {
+                "message": "Invalid message data", "code": 100, "error_subcode": 2534015,
+            }})
+        return httpx.Response(200, json={"recipient_id": "commenter-1"})
+
+    original_client = httpx.AsyncClient
+    with patch("instagram.httpx.AsyncClient", side_effect=lambda **kwargs: original_client(
+        transport=httpx.MockTransport(respond), **kwargs
+    )):
+        recipient = asyncio.run(send_direct_message(
+            "ig-1", "", "Please follow", "private-token", "Done", "", "FOLLOW", comment_id="comment-1"
+        ))
+
+    assert recipient == "commenter-1"
+    assert calls[0]["message"]["quick_replies"][0]["payload"] == "FOLLOW"
+    assert calls[1] == {
+        "recipient": {"comment_id": "comment-1"},
+        "message": {"text": "Please follow\n\nReply / Ответьте: Done"},
+    }
+
+
+def test_worker_private_reply_retries_without_interactive_content_on_meta_2534015(tmp_path, monkeypatch):
+    calls = []
+
+    class Response:
+        def __init__(self, status):
+            self.status = status
+
+        async def json(self):
+            return {"recipient_id": "commenter-1"}
+
+        async def text(self):
+            return json.dumps({"error": {
+                "message": "Invalid message data", "code": 100, "error_subcode": 2534015,
+            }})
+
+    async def fetch(url, **kwargs):
+        calls.append(json.loads(kwargs["body"]))
+        return Response(400 if len(calls) == 1 else 200)
+
+    worker_stub = ModuleType("workers")
+    worker_stub.fetch = fetch
+    with patch.dict(sys.modules, {"workers": worker_stub}):
+        try:
+            worker_client = importlib.import_module("cloudflare_instagram")
+            recipient = asyncio.run(worker_client.send_direct_message(
+                "ig-1", "", "Open the link", "private-token", "Guide", "https://example.com/guide",
+                comment_id="comment-1",
+            ))
+        finally:
+            sys.modules.pop("cloudflare_instagram", None)
+
+    assert recipient == "commenter-1"
+    assert calls[0]["message"]["attachment"]["payload"]["template_type"] == "button"
+    assert calls[1] == {
+        "recipient": {"comment_id": "comment-1"},
+        "message": {"text": "Open the link\n\nGuide: https://example.com/guide"},
+    }
+
+
 def test_connection_posts_rules_and_comment_reply(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "test.db"))
     monkeypatch.setenv("INSTAGRAM_APP_ID", "test-app")
@@ -217,6 +283,26 @@ def test_connection_posts_rules_and_comment_reply(tmp_path, monkeypatch):
                 "SELECT sender_id FROM pending_subscription_checks WHERE draft_id = ?",
                 (draft.json()["id"],),
             ).fetchone()[0] == "commenter-2"
+        typed_confirmation = {"entry": [{"id": "ig-1", "messaging": [{
+            "sender": {"id": "commenter-2"},
+            "message": {"mid": "typed-confirmation-1", "text": "Done"},
+        }]}]}
+        typed_body = json.dumps(typed_confirmation).encode()
+        typed_signature = "sha256=" + hmac.new(b"test-secret", typed_body, hashlib.sha256).hexdigest()
+        with patch("main.check_subscription", new_callable=AsyncMock, return_value=True), patch(
+            "main.send_direct_message", new_callable=AsyncMock
+        ) as message:
+            assert client.post(
+                "/api/webhooks/instagram", content=typed_body,
+                headers={"X-Hub-Signature-256": typed_signature},
+            ).status_code == 200
+            message.assert_awaited_once()
+            assert message.await_args.args[:3] == ("ig-1", "commenter-2", "Here is the guide")
+        with connection() as db:
+            assert db.execute(
+                "SELECT count(*) FROM pending_subscription_checks WHERE draft_id = ?",
+                (draft.json()["id"],),
+            ).fetchone()[0] == 0
         private_reply_event = {"entry": [{"id": "ig-1", "changes": [{"field": "comments", "value": {
             "id": "comment-3", "media": {"id": "post-1"}, "text": "Hello again",
             "from": {"id": "commenter-1"},

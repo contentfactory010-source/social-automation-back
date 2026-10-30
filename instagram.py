@@ -1,5 +1,7 @@
 """Calls for the Instagram Login flavor of Meta's API."""
 
+import json
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
@@ -17,6 +19,24 @@ GRAPH_URL = "https://graph.instagram.com"
 
 class InstagramError(Exception):
     pass
+
+
+def invalid_message_data(error_text: str) -> bool:
+    """Recognize Meta's rejection of an unsupported message payload."""
+    try:
+        details = json.loads(error_text[error_text.index("{"):]).get("error", {})
+    except (ValueError, TypeError, AttributeError):
+        return False
+    return details.get("code") == 100 and details.get("error_subcode") == 2534015
+
+
+def plain_private_reply(message: str, button_text: str, button_url: str) -> str:
+    """Keep the CTA usable when Meta rejects interactive private replies."""
+    if button_url.strip():
+        return f"{message}\n\n{button_text.strip() or 'Link'}: {button_url.strip()}"
+    if button_text.strip():
+        return f"{message}\n\nReply / Ответьте: {button_text.strip()}"
+    return message
 
 
 def setting(name: str) -> str:
@@ -186,6 +206,18 @@ async def send_direct_message(
                 json=payload,
                 headers={"Authorization": f"Bearer {token}"},
             )
+            if (
+                comment_id and (button_text.strip() or button_url.strip())
+                and response.status_code == 400 and invalid_message_data(response.text)
+            ):
+                logging.getLogger("uvicorn.error").warning(
+                    "Instagram rejected interactive private reply; retrying as text: comment_id=%s", comment_id
+                )
+                response = await client.post(
+                    f"{GRAPH_URL}/{ig_user_id}/messages",
+                    json={"recipient": recipient, "message": {"text": plain_private_reply(message, button_text, button_url)}},
+                    headers={"Authorization": f"Bearer {token}"},
+                )
             response.raise_for_status()
             return str(response.json().get("recipient_id") or recipient_id)
         except httpx.HTTPStatusError as exc:
