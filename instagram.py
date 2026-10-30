@@ -147,7 +147,7 @@ async def send_direct_message(
     button_url: str = "",
     button_payload: str = "SOCIAL_AUTOMATION_REPLY",
     comment_id: str = "",
-) -> None:
+) -> str:
     """Send a DM, or a private reply to a comment that starts the conversation."""
     async with httpx.AsyncClient(timeout=20) as client:
         try:
@@ -182,12 +182,12 @@ async def send_direct_message(
                     "payload": button_payload[:1000],
                 }]
             response = await client.post(
-                f"{GRAPH_URL}/me/messages",
+                f"{GRAPH_URL}/{ig_user_id if comment_id else 'me'}/messages",
                 json=payload,
                 headers={"Authorization": f"Bearer {token}"},
             )
             response.raise_for_status()
-            return
+            return str(response.json().get("recipient_id") or recipient_id)
         except httpx.HTTPStatusError as exc:
             raise InstagramError(
                 f"Could not send Instagram direct message ({exc.response.status_code}): {exc.response.text[:500]}"

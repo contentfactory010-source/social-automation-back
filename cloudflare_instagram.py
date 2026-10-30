@@ -116,7 +116,7 @@ async def send_direct_message(
     button_url: str = "",
     button_payload: str = "SOCIAL_AUTOMATION_REPLY",
     comment_id: str = "",
-) -> None:
+) -> str:
     recipient = {"comment_id": comment_id} if comment_id else {"id": recipient_id}
     if button_url.strip():
         payload = {
@@ -147,12 +147,14 @@ async def send_direct_message(
             "title": button_text.strip()[:20],
             "payload": button_payload[:1000],
         }]
-    await request(
-        f"{GRAPH_URL}/me/messages",
+    response = await request(
+        f"{GRAPH_URL}/{ig_user_id if comment_id else 'me'}/messages",
         "POST",
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
         body=json.dumps(payload),
     )
+    result = await response.json()
+    return str(result.get("recipient_id") or recipient_id)
 
 
 async def subscribe_to_webhooks(ig_user_id: str, token: str) -> None:

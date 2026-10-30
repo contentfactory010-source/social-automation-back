@@ -898,10 +898,9 @@ async def instagram_webhook(request: Request) -> dict:
                                     "DELETE FROM processed_draft_events WHERE event_id = ? AND draft_id = ?",
                                     (public_reply_event_id, draft["id"]),
                                 )
-                if not commenter_id:
-                    continue
-                if draft_value(config, "check_subscription", "checkSubscription", False):
-                    subscribed = await check_subscription(commenter_id, draft["access_token"])
+                needs_subscription_check = bool(draft_value(config, "check_subscription", "checkSubscription", False))
+                if needs_subscription_check:
+                    subscribed = bool(commenter_id) and await check_subscription(commenter_id, draft["access_token"])
                     reply_text = (
                         draft_value(config, "after_subscription_message", "afterSubscriptionMessage", "")
                         if subscribed
@@ -929,11 +928,6 @@ async def instagram_webhook(request: Request) -> dict:
                             config, "no_subscription_button", "noSubscriptionButton", "Check follow"
                         ).strip() or "Check follow"
                         reply_payload = f"SA_CHECK_SUBSCRIPTION:{draft['id']}"
-                        with connection() as db:
-                            db.execute(
-                                "INSERT OR REPLACE INTO pending_subscription_checks (ig_user_id, sender_id, draft_id, session_id, created_at) VALUES (?, ?, ?, ?, ?)",
-                                (ig_user_id, commenter_id, draft["id"], canonical_session_id, now()),
-                            )
                 else:
                     reply_text = draft_value(config, "welcome_message", "welcomeMessage", "").strip()
                     reply_button = draft_value(config, "welcome_button", "welcomeButton", "").strip()
@@ -950,7 +944,11 @@ async def instagram_webhook(request: Request) -> dict:
                 except sqlite3.IntegrityError:
                     continue
                 try:
-                    await send_direct_message(
+                    logger.info(
+                        "Sending Instagram private reply: account=%s comment_id=%s draft=%s has_commenter=%s has_button=%s has_url=%s",
+                        ig_user_id, comment_id, draft["id"], bool(commenter_id), bool(reply_button), bool(reply_url),
+                    )
+                    recipient_id = await send_direct_message(
                         ig_user_id,
                         commenter_id,
                         reply_text,
@@ -960,6 +958,17 @@ async def instagram_webhook(request: Request) -> dict:
                         reply_payload,
                         comment_id=comment_id,
                     )
+                    if needs_subscription_check and not subscribed:
+                        pending_sender_id = str(recipient_id or commenter_id)
+                        if pending_sender_id:
+                            with connection() as db:
+                                db.execute(
+                                    "INSERT OR REPLACE INTO pending_subscription_checks (ig_user_id, sender_id, draft_id, session_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                                    (ig_user_id, pending_sender_id, draft["id"], canonical_session_id, now()),
+                                )
+                        else:
+                            logger.warning("Private reply sent without a recipient ID; follow check unavailable: comment_id=%s", comment_id)
+                    logger.info("Instagram private reply sent: comment_id=%s draft=%s", comment_id, draft["id"])
                 except InstagramError:
                     logger.exception("Could not send automation message for comment %s", comment_id)
                     with connection() as db:

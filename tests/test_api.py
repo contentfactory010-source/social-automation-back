@@ -1,14 +1,76 @@
+import asyncio
 import hashlib
 import hmac
+import importlib
 import json
+import sys
+from types import ModuleType
 from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, urlparse
 
+import httpx
 from fastapi.testclient import TestClient
 
 from db import connection
 from instagram import InstagramError
+from instagram import send_direct_message
 from main import app
+
+
+def test_private_reply_uses_instagram_account_and_comment_id(tmp_path, monkeypatch):
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json={"recipient_id": "commenter-1", "message_id": "message-1"})
+
+    original_client = httpx.AsyncClient
+    with patch("instagram.httpx.AsyncClient", side_effect=lambda **kwargs: original_client(
+        transport=httpx.MockTransport(respond), **kwargs
+    )):
+        recipient_id = asyncio.run(send_direct_message(
+            "ig-1", "", "Please follow", "private-token", "Done", "", "FOLLOW", comment_id="comment-1"
+        ))
+        asyncio.run(send_direct_message("ig-1", "commenter-1", "Thanks", "private-token"))
+
+    assert recipient_id == "commenter-1"
+    assert requests[0].url.path == "/ig-1/messages"
+    assert json.loads(requests[0].content)["recipient"] == {"comment_id": "comment-1"}
+    assert json.loads(requests[0].content)["message"]["quick_replies"][0]["payload"] == "FOLLOW"
+    assert requests[1].url.path == "/me/messages"
+    assert json.loads(requests[1].content)["recipient"] == {"id": "commenter-1"}
+
+
+def test_worker_private_reply_uses_instagram_account_and_comment_id(tmp_path, monkeypatch):
+    calls = []
+
+    class Response:
+        status = 200
+
+        async def json(self):
+            return {"recipient_id": "commenter-1", "message_id": "message-1"}
+
+    async def fetch(url, **kwargs):
+        calls.append((url, kwargs))
+        return Response()
+
+    worker_stub = ModuleType("workers")
+    worker_stub.fetch = fetch
+    with patch.dict(sys.modules, {"workers": worker_stub}):
+        try:
+            worker_client = importlib.import_module("cloudflare_instagram")
+            recipient_id = asyncio.run(worker_client.send_direct_message(
+                "ig-1", "", "Please follow", "private-token", "Done", "", "FOLLOW", comment_id="comment-1"
+            ))
+            asyncio.run(worker_client.send_direct_message("ig-1", "commenter-1", "Thanks", "private-token"))
+        finally:
+            sys.modules.pop("cloudflare_instagram", None)
+
+    assert recipient_id == "commenter-1"
+    assert calls[0][0] == "https://graph.instagram.com/ig-1/messages"
+    assert json.loads(calls[0][1]["body"])["recipient"] == {"comment_id": "comment-1"}
+    assert calls[1][0] == "https://graph.instagram.com/me/messages"
+    assert json.loads(calls[1][1]["body"])["recipient"] == {"id": "commenter-1"}
 
 
 def test_connection_posts_rules_and_comment_reply(tmp_path, monkeypatch):
@@ -109,10 +171,14 @@ def test_connection_posts_rules_and_comment_reply(tmp_path, monkeypatch):
         body = json.dumps(event).encode()
         signature = "sha256=" + hmac.new(b"test-secret", body, hashlib.sha256).hexdigest()
         headers = {"X-Hub-Signature-256": signature}
-        with patch("main.reply_to_comment", new_callable=AsyncMock) as reply:
+        with patch("main.reply_to_comment", new_callable=AsyncMock) as reply, patch(
+            "main.send_direct_message", new_callable=AsyncMock, return_value="commenter-2"
+        ) as message:
             assert client.post("/api/webhooks/instagram", content=body, headers=headers).status_code == 200
             assert client.post("/api/webhooks/instagram", content=body, headers=headers).status_code == 200
             reply.assert_awaited_once_with("comment-1", "Thanks!", "private-token")
+            assert message.await_count == 1
+            assert message.await_args.kwargs["comment_id"] == "comment-1"
         with connection() as db:
             assert db.execute("SELECT count(*) FROM processed_comments").fetchone()[0] == 1
 
@@ -132,7 +198,7 @@ def test_connection_posts_rules_and_comment_reply(tmp_path, monkeypatch):
         draft_only_body = json.dumps(draft_only_event).encode()
         draft_only_signature = "sha256=" + hmac.new(b"test-secret", draft_only_body, hashlib.sha256).hexdigest()
         with patch("main.reply_to_comment", new_callable=AsyncMock) as reply, patch(
-            "main.send_direct_message", new_callable=AsyncMock
+            "main.send_direct_message", new_callable=AsyncMock, return_value="commenter-2"
         ) as message:
             assert client.post(
                 "/api/webhooks/instagram", content=draft_only_body,
@@ -143,7 +209,14 @@ def test_connection_posts_rules_and_comment_reply(tmp_path, monkeypatch):
                 headers={"X-Hub-Signature-256": draft_only_signature},
             ).status_code == 200
             reply.assert_awaited_once_with("comment-2", "Sent to DM", "private-token")
-            message.assert_not_awaited()
+            assert message.await_count == 1
+            assert message.await_args.kwargs["comment_id"] == "comment-2"
+            assert message.await_args.args[1] == ""
+        with connection() as db:
+            assert db.execute(
+                "SELECT sender_id FROM pending_subscription_checks WHERE draft_id = ?",
+                (draft.json()["id"],),
+            ).fetchone()[0] == "commenter-2"
         private_reply_event = {"entry": [{"id": "ig-1", "changes": [{"field": "comments", "value": {
             "id": "comment-3", "media": {"id": "post-1"}, "text": "Hello again",
             "from": {"id": "commenter-1"},
