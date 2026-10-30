@@ -868,6 +868,36 @@ async def instagram_webhook(request: Request) -> dict:
                     continue
                 if comment_mode not in {"any", "keywords"}:
                     continue
+                comment_replies = [
+                    str(message).strip()
+                    for message in draft_value(config, "comment_replies", "commentReplies", [])
+                    if str(message).strip()
+                ]
+                if draft_value(config, "comment_replies_enabled", "commentRepliesEnabled", False) and comment_replies:
+                    public_reply_event_id = f"comment_reply:{comment_id}"
+                    try:
+                        with connection() as db:
+                            db.execute(
+                                "INSERT INTO processed_draft_events (event_id, draft_id, created_at) VALUES (?, ?, ?)",
+                                (public_reply_event_id, draft["id"], now()),
+                            )
+                    except sqlite3.IntegrityError:
+                        pass
+                    else:
+                        try:
+                            await reply_to_comment(
+                                comment_id,
+                                secrets.choice(comment_replies),
+                                draft["access_token"],
+                            )
+                            logger.info("Instagram automatic comment reply sent: comment_id=%s draft=%s", comment_id, draft["id"])
+                        except InstagramError:
+                            logger.exception("Could not send automatic comment reply %s", comment_id)
+                            with connection() as db:
+                                db.execute(
+                                    "DELETE FROM processed_draft_events WHERE event_id = ? AND draft_id = ?",
+                                    (public_reply_event_id, draft["id"]),
+                                )
                 if not commenter_id:
                     continue
                 if draft_value(config, "check_subscription", "checkSubscription", False):
@@ -911,21 +941,6 @@ async def instagram_webhook(request: Request) -> dict:
                     reply_payload = ""
                 if not reply_text:
                     continue
-                comment_replies = [
-                    str(message).strip()
-                    for message in draft_value(config, "comment_replies", "commentReplies", [])
-                    if str(message).strip()
-                ]
-                if draft_value(config, "comment_replies_enabled", "commentRepliesEnabled", False) and comment_replies:
-                    try:
-                        await reply_to_comment(
-                            comment_id,
-                            secrets.choice(comment_replies),
-                            draft["access_token"],
-                        )
-                        logger.info("Instagram automatic comment reply sent: comment_id=%s draft=%s", comment_id, draft["id"])
-                    except InstagramError:
-                        logger.exception("Could not send automatic comment reply %s", comment_id)
                 try:
                     with connection() as db:
                         db.execute(
@@ -943,6 +958,7 @@ async def instagram_webhook(request: Request) -> dict:
                         reply_button,
                         reply_url,
                         reply_payload,
+                        comment_id=comment_id,
                     )
                 except InstagramError:
                     logger.exception("Could not send automation message for comment %s", comment_id)

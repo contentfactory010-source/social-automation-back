@@ -7,6 +7,7 @@ from urllib.parse import parse_qs, urlparse
 from fastapi.testclient import TestClient
 
 from db import connection
+from instagram import InstagramError
 from main import app
 
 
@@ -119,17 +120,74 @@ def test_connection_posts_rules_and_comment_reply(tmp_path, monkeypatch):
             "/api/automations/post-1", headers={"X-Requested-With": "XMLHttpRequest"}
         ).status_code == 200
         assert client.get("/api/automations").json()["data"] == []
+        with patch("main.get_posts", new_callable=AsyncMock, return_value=[sample_post]):
+            assert client.put(
+                f"/api/automation-drafts/{draft.json()['id']}",
+                json={**draft_input, "comment_replies_enabled": True, "comment_replies": ["Sent to DM"]},
+                headers={"X-Requested-With": "XMLHttpRequest"},
+            ).status_code == 200
         draft_only_event = {"entry": [{"id": "ig-1", "changes": [{"field": "comments", "value": {
             "id": "comment-2", "media": {"id": "post-1"}, "text": "Hello again"
         }}]}]}
         draft_only_body = json.dumps(draft_only_event).encode()
         draft_only_signature = "sha256=" + hmac.new(b"test-secret", draft_only_body, hashlib.sha256).hexdigest()
-        with patch("main.reply_to_comment", new_callable=AsyncMock) as reply:
+        with patch("main.reply_to_comment", new_callable=AsyncMock) as reply, patch(
+            "main.send_direct_message", new_callable=AsyncMock
+        ) as message:
             assert client.post(
                 "/api/webhooks/instagram", content=draft_only_body,
                 headers={"X-Hub-Signature-256": draft_only_signature},
             ).status_code == 200
-            reply.assert_not_awaited()
+            assert client.post(
+                "/api/webhooks/instagram", content=draft_only_body,
+                headers={"X-Hub-Signature-256": draft_only_signature},
+            ).status_code == 200
+            reply.assert_awaited_once_with("comment-2", "Sent to DM", "private-token")
+            message.assert_not_awaited()
+        private_reply_event = {"entry": [{"id": "ig-1", "changes": [{"field": "comments", "value": {
+            "id": "comment-3", "media": {"id": "post-1"}, "text": "Hello again",
+            "from": {"id": "commenter-1"},
+        }}]}]}
+        private_reply_body = json.dumps(private_reply_event).encode()
+        private_reply_signature = "sha256=" + hmac.new(
+            b"test-secret", private_reply_body, hashlib.sha256
+        ).hexdigest()
+        with patch("main.check_subscription", new_callable=AsyncMock, return_value=True), patch(
+            "main.reply_to_comment", new_callable=AsyncMock
+        ) as reply, patch(
+            "main.send_direct_message", new_callable=AsyncMock
+        ) as message:
+            assert client.post(
+                "/api/webhooks/instagram", content=private_reply_body,
+                headers={"X-Hub-Signature-256": private_reply_signature},
+            ).status_code == 200
+            assert client.post(
+                "/api/webhooks/instagram", content=private_reply_body,
+                headers={"X-Hub-Signature-256": private_reply_signature},
+            ).status_code == 200
+            reply.assert_awaited_once_with("comment-3", "Sent to DM", "private-token")
+            assert message.await_count == 1
+            assert message.await_args.kwargs["comment_id"] == "comment-3"
+            assert message.await_args.args[:3] == ("ig-1", "commenter-1", "Here is the guide")
+        failed_dm_event = {"entry": [{"id": "ig-1", "changes": [{"field": "comments", "value": {
+            "id": "comment-4", "media": {"id": "post-1"}, "text": "Hello again",
+            "from": {"id": "commenter-1"},
+        }}]}]}
+        failed_dm_body = json.dumps(failed_dm_event).encode()
+        failed_dm_signature = "sha256=" + hmac.new(b"test-secret", failed_dm_body, hashlib.sha256).hexdigest()
+        with patch("main.check_subscription", new_callable=AsyncMock, return_value=True), patch(
+            "main.reply_to_comment", new_callable=AsyncMock
+        ) as reply, patch(
+            "main.send_direct_message", new_callable=AsyncMock,
+            side_effect=[InstagramError("DM failed"), None]
+        ) as message:
+            for _ in range(2):
+                assert client.post(
+                    "/api/webhooks/instagram", content=failed_dm_body,
+                    headers={"X-Hub-Signature-256": failed_dm_signature},
+                ).status_code == 200
+            reply.assert_awaited_once_with("comment-4", "Sent to DM", "private-token")
+            assert message.await_count == 2
         assert client.delete(
             "/api/connection", headers={"X-Requested-With": "XMLHttpRequest"}
         ).status_code == 200

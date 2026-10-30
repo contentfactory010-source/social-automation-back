@@ -146,17 +146,15 @@ async def send_direct_message(
     button_text: str = "",
     button_url: str = "",
     button_payload: str = "SOCIAL_AUTOMATION_REPLY",
+    comment_id: str = "",
 ) -> None:
-    """Send a DM through Instagram's Send API.
-
-    Instagram only allows this for a recipient who has already initiated the
-    conversation with the connected professional account.
-    """
+    """Send a DM, or a private reply to a comment that starts the conversation."""
     async with httpx.AsyncClient(timeout=20) as client:
         try:
+            recipient = {"comment_id": comment_id} if comment_id else {"id": recipient_id}
             if button_url.strip():
                 payload = {
-                    "recipient": {"id": recipient_id},
+                    "recipient": recipient,
                     "message": {
                         "attachment": {
                             "type": "template",
@@ -174,7 +172,7 @@ async def send_direct_message(
                 }
             else:
                 payload = {
-                    "recipient": {"id": recipient_id},
+                    "recipient": recipient,
                     "message": {"text": message},
                 }
             if button_text.strip() and not button_url.strip():

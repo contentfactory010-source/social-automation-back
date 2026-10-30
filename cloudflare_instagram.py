@@ -115,10 +115,12 @@ async def send_direct_message(
     button_text: str = "",
     button_url: str = "",
     button_payload: str = "SOCIAL_AUTOMATION_REPLY",
+    comment_id: str = "",
 ) -> None:
+    recipient = {"comment_id": comment_id} if comment_id else {"id": recipient_id}
     if button_url.strip():
         payload = {
-            "recipient": {"id": recipient_id},
+            "recipient": recipient,
             "message": {
                 "attachment": {
                     "type": "template",
@@ -136,7 +138,7 @@ async def send_direct_message(
         }
     else:
         payload = {
-            "recipient": {"id": recipient_id},
+            "recipient": recipient,
             "message": {"text": message},
         }
     if button_text.strip() and not button_url.strip():
