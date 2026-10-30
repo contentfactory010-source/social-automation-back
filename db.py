@@ -41,7 +41,12 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS oauth_states (
                 state TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                cf_user_id TEXT
+            );
+            CREATE TABLE IF NOT EXISTS cf_user_connections (
+                cf_user_id TEXT PRIMARY KEY,
+                ig_user_id TEXT NOT NULL UNIQUE
             );
             CREATE TABLE IF NOT EXISTS automations (
                 id TEXT PRIMARY KEY,
@@ -92,3 +97,6 @@ def init_db() -> None:
             columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
             if "enabled" not in columns:
                 db.execute(f"ALTER TABLE {table} ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1")
+        oauth_columns = {row[1] for row in db.execute("PRAGMA table_info(oauth_states)")}
+        if "cf_user_id" not in oauth_columns:
+            db.execute("ALTER TABLE oauth_states ADD COLUMN cf_user_id TEXT")

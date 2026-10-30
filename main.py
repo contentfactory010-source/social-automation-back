@@ -32,6 +32,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
 from db import connection, init_db
+from cf_bridge import verify_cf_access_token
 from instagram import (
     InstagramError,
     authorization_url,
@@ -207,6 +208,17 @@ class InstagramHandoffInput(BaseModel):
     ticket: str = Field(min_length=1, max_length=256)
 
 
+class CfOAuthPrepareInput(BaseModel):
+    return_to: str = Field(min_length=1, max_length=2048)
+
+
+def cf_bearer_token(authorization: Optional[str]) -> str:
+    scheme, _, token = (authorization or "").partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        raise HTTPException(401, "Content Factory login is required")
+    return token.strip()
+
+
 class AutomationInput(BaseModel):
     keyword: str = Field(min_length=1, max_length=200)
     text: str = Field(min_length=1, max_length=2000)
@@ -286,20 +298,67 @@ def health() -> dict:
     return {"ok": True}
 
 
+@app.post("/api/auth/instagram/prepare", dependencies=[Depends(require_browser_request)])
+async def prepare_cf_oauth(data: CfOAuthPrepareInput, response: Response,
+                           authorization: Optional[str] = Header(None)) -> dict:
+    if not valid_return_to(data.return_to):
+        raise HTTPException(400, "Invalid return URL")
+    cf_user_id = await verify_cf_access_token(cf_bearer_token(authorization))
+    ticket = "prepare." + secrets.token_urlsafe(32)
+    session_id = secrets.token_urlsafe(32)
+    with connection() as db:
+        db.execute("INSERT INTO sessions (id) VALUES (?)", (session_id,))
+        db.execute(
+            "INSERT INTO oauth_states (state, session_id, created_at, cf_user_id) VALUES (?, ?, ?, ?)",
+            (ticket, session_id, now(), cf_user_id),
+        )
+    response_url = f"/api/auth/instagram/start?{urlencode({'return_to': data.return_to, 'cf_ticket': ticket})}"
+    response.headers["Cache-Control"] = "no-store"
+    return {"url": response_url}
+
+
+@app.post("/api/client/session", dependencies=[Depends(require_browser_request)])
+async def cf_client_session(response: Response, authorization: Optional[str] = Header(None)) -> dict:
+    cf_user_id = await verify_cf_access_token(cf_bearer_token(authorization))
+    with connection() as db:
+        row = db.execute(
+            """SELECT s.id, s.ig_user_id, s.username, s.connected_at
+               FROM cf_user_connections c JOIN sessions s ON s.ig_user_id = c.ig_user_id
+               WHERE c.cf_user_id = ? AND s.access_token IS NOT NULL
+               ORDER BY s.connected_at DESC LIMIT 1""", (cf_user_id,),
+        ).fetchone()
+    response.headers["Cache-Control"] = "no-store"
+    if not row:
+        return {"connected": False}
+    return {"connected": True, "instagramUserId": row["ig_user_id"], "username": row["username"],
+            "connectedAt": row["connected_at"], "sessionToken": row["id"], "cfUserId": cf_user_id}
+
+
 @app.get("/api/auth/instagram/start")
-def instagram_start(request: Request, return_to: str = "") -> RedirectResponse:
+def instagram_start(request: Request, return_to: str = "", cf_ticket: str = "") -> RedirectResponse:
     if return_to and (len(return_to) > 2048 or not valid_return_to(return_to)):
         raise HTTPException(400, "Invalid return URL")
     try:
         state = secrets.token_urlsafe(32)
         if return_to:
             state += "." + base64.urlsafe_b64encode(return_to.encode()).decode().rstrip("=")
+        cf_user_id = None
         session_id = request.cookies.get(SESSION_COOKIE) or secrets.token_urlsafe(32)
         with connection() as db:
+            if cf_ticket:
+                prepared = db.execute(
+                    "SELECT session_id, created_at, cf_user_id FROM oauth_states WHERE state = ?",
+                    (cf_ticket,),
+                ).fetchone()
+                deleted = db.execute("DELETE FROM oauth_states WHERE state = ?", (cf_ticket,))
+                if not prepared or deleted.rowcount != 1 or not prepared["cf_user_id"] or datetime.fromisoformat(prepared["created_at"]) < datetime.now(timezone.utc) - timedelta(minutes=5):
+                    raise HTTPException(400, "Invalid or expired Content Factory authorization ticket")
+                session_id = prepared["session_id"]
+                cf_user_id = prepared["cf_user_id"]
             db.execute("INSERT OR IGNORE INTO sessions (id) VALUES (?)", (session_id,))
             db.execute(
-                "INSERT INTO oauth_states (state, session_id, created_at) VALUES (?, ?, ?)",
-                (state, session_id, now()),
+                "INSERT INTO oauth_states (state, session_id, created_at, cf_user_id) VALUES (?, ?, ?, ?)",
+                (state, session_id, now(), cf_user_id),
             )
         response = RedirectResponse(authorization_url(state), status_code=302)
         set_session_cookie(response, session_id)
@@ -344,10 +403,30 @@ async def instagram_callback(request: Request, code: str = "", state: str = "", 
     )
     try:
         with connection() as db:
+            if saved["cf_user_id"]:
+                owner = db.execute("SELECT cf_user_id FROM cf_user_connections WHERE ig_user_id = ?", (instagram_user_id,)).fetchone()
+                if owner and owner["cf_user_id"] != saved["cf_user_id"]:
+                    raise HTTPException(409, "Instagram account is already linked to another Content Factory user")
             session_id = connect_account(
                 db, instagram_user_id, profile.get("username", ""), token["access_token"],
                 token["token_expires_at"], session_id,
             )
+            if saved["cf_user_id"]:
+                previous = db.execute(
+                    "SELECT ig_user_id FROM cf_user_connections WHERE cf_user_id = ?",
+                    (saved["cf_user_id"],),
+                ).fetchone()
+                if previous and previous["ig_user_id"] != instagram_user_id:
+                    db.execute("DELETE FROM pending_subscription_checks WHERE ig_user_id = ?", (previous["ig_user_id"],))
+                    db.execute(
+                        "UPDATE sessions SET access_token = NULL, token_expires_at = NULL WHERE ig_user_id = ?",
+                        (previous["ig_user_id"],),
+                    )
+                db.execute(
+                    "INSERT INTO cf_user_connections (cf_user_id, ig_user_id) VALUES (?, ?) "
+                    "ON CONFLICT(cf_user_id) DO UPDATE SET ig_user_id = excluded.ig_user_id",
+                    (saved["cf_user_id"], instagram_user_id),
+                )
     except HTTPException as exc:
         return redirect_front(str(exc.detail), return_to)
     try:
@@ -361,8 +440,8 @@ async def instagram_callback(request: Request, code: str = "", state: str = "", 
         ticket = "handoff." + secrets.token_urlsafe(32)
         with connection() as db:
             db.execute(
-                "INSERT INTO oauth_states (state, session_id, created_at) VALUES (?, ?, ?)",
-                (ticket, session_id, now()),
+                "INSERT INTO oauth_states (state, session_id, created_at, cf_user_id) VALUES (?, ?, ?, ?)",
+                (ticket, session_id, now(), saved["cf_user_id"]),
             )
         response = RedirectResponse(f"{return_to}?{urlencode({'sa_ticket': ticket})}", status_code=303)
         response.headers["Cache-Control"] = "no-store"
@@ -373,11 +452,17 @@ async def instagram_callback(request: Request, code: str = "", state: str = "", 
 
 
 @app.post("/api/auth/instagram/claim", dependencies=[Depends(require_browser_request)])
-def claim_instagram_handoff(data: InstagramHandoffInput, response: Response) -> dict:
+async def claim_instagram_handoff(data: InstagramHandoffInput, response: Response,
+                                 authorization: Optional[str] = Header(None)) -> dict:
     if not data.ticket.startswith("handoff."):
         raise HTTPException(400, "Invalid handoff ticket")
     with connection() as db:
-        row = db.execute("SELECT session_id, created_at FROM oauth_states WHERE state = ?", (data.ticket,)).fetchone()
+        row = db.execute("SELECT session_id, created_at, cf_user_id FROM oauth_states WHERE state = ?", (data.ticket,)).fetchone()
+    if row and row["cf_user_id"]:
+        cf_user_id = await verify_cf_access_token(cf_bearer_token(authorization))
+        if cf_user_id != row["cf_user_id"]:
+            raise HTTPException(403, "Content Factory user does not match the OAuth connection")
+    with connection() as db:
         deleted = db.execute("DELETE FROM oauth_states WHERE state = ?", (data.ticket,))
         session = db.execute("SELECT * FROM sessions WHERE id = ?", (row["session_id"],)).fetchone() if row and deleted.rowcount == 1 else None
     if not row or deleted.rowcount != 1 or not session or not session["access_token"] or datetime.fromisoformat(row["created_at"]) < datetime.now(timezone.utc) - timedelta(minutes=5):
@@ -389,6 +474,7 @@ def claim_instagram_handoff(data: InstagramHandoffInput, response: Response) -> 
         "username": session["username"],
         "connectedAt": session["connected_at"],
         "sessionToken": session["id"],
+        "cfUserId": row["cf_user_id"],
     }
 
 

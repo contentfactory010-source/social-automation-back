@@ -5,6 +5,7 @@ from workers import asgi
 import main as legacy
 import cloudflare_db
 import cloudflare_instagram
+import cloudflare_cf_bridge
 from cloudflare_config import bind_env, reset_env, setting, value
 
 
@@ -21,6 +22,7 @@ legacy.get_user_profile = cloudflare_instagram.get_user_profile
 legacy.reply_to_comment = cloudflare_instagram.reply_to_comment
 legacy.send_direct_message = cloudflare_instagram.send_direct_message
 legacy.subscribe_to_webhooks = cloudflare_instagram.subscribe_to_webhooks
+legacy.verify_cf_access_token = cloudflare_cf_bridge.verify_cf_access_token
 
 # FastAPI builds CORSMiddleware before Worker bindings are available. Remove
 # that static middleware and apply the Worker origin at request time instead.
